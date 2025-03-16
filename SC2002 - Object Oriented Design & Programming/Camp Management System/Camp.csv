@@ -1,0 +1,3 @@
+﻿Camp Name,Start and End Date,Close Date,Faculty,Location,Total Slots,Remaining Slot,remaining committee slot,remaining attendee slot,staff name,visbility,attendees name,committee name
+SCSE,2023-05-14|2023-05-20,2023-04-20,SCSE,NORTH SPINE,100,100,10,10,John Sim,true,null,null
+NBS,2023-07-15|2023-07-19,2023-06-29,NBS,SOUTH SPINE,200,200,10,10,John Sim,true,null,null
