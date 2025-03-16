@@ -1,0 +1,1578 @@
+/* USER CODE BEGIN Header */
+/**
+  ******************************************************************************
+  * @file           : main.c
+  * @brief          : Main program body
+  ******************************************************************************
+  * @attention
+  *
+  * Copyright (c) 2023 STMicroelectronics.
+  * All rights reserved.
+  *
+  * This software is licensed under terms that can be found in the LICENSE file
+  * in the root directory of this software component.
+  * If no LICENSE file comes with this software, it is provided AS-IS.
+  *
+  ******************************************************************************
+  */
+/* USER CODE END Header */
+/* Includes ------------------------------------------------------------------*/
+#include "main.h"
+#include "cmsis_os.h"
+
+/* Private includes ----------------------------------------------------------*/
+/* USER CODE BEGIN Includes */
+#include <math.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include "oled.h"
+#include "motors.h"
+#include "imu.h"
+#include "servo.h"
+#include "comm.h"
+/* USER CODE END Includes */
+
+/* Private typedef -----------------------------------------------------------*/
+/* USER CODE BEGIN PTD */
+
+/* USER CODE END PTD */
+
+/* Private define ------------------------------------------------------------*/
+/* USER CODE BEGIN PD */
+
+/* USER CODE END PD */
+
+/* Private macro -------------------------------------------------------------*/
+/* USER CODE BEGIN PM */
+
+/* USER CODE END PM */
+
+/* Private variables ---------------------------------------------------------*/
+ADC_HandleTypeDef hadc1;
+ADC_HandleTypeDef hadc2;
+
+I2C_HandleTypeDef hi2c1;
+
+TIM_HandleTypeDef htim1;
+TIM_HandleTypeDef htim2;
+TIM_HandleTypeDef htim3;
+TIM_HandleTypeDef htim6;
+TIM_HandleTypeDef htim8;
+
+UART_HandleTypeDef huart1;
+UART_HandleTypeDef huart3;
+
+/* Definitions for defaultTask */
+osThreadId_t default_Task_Handler;
+const osThreadAttr_t default_Task_Attributes = {
+  .name = "defaultTask",
+  .stack_size = 128 * 4,
+  .priority = (osPriority_t) osPriorityLow,
+};
+/* Definitions for motorServo */
+osThreadId_t motor_Servo_Handler;
+const osThreadAttr_t motor_Servo_Attributes = {
+  .name = "motorServo",
+  .stack_size = 2048 * 4,
+  .priority = (osPriority_t) osPriorityHigh,
+};
+/* Definitions for imu */
+osThreadId_t imu_Handler;
+const osThreadAttr_t imu_Attributes   = {
+  .name = "imu",
+  .stack_size = 512 * 4,
+  .priority = (osPriority_t) osPriorityHigh,
+};
+/* Definitions for ultrasound */
+osThreadId_t ultrasound_Handler;
+const osThreadAttr_t ultrasound_Attributes = {
+  .name = "ultrasound",
+  .stack_size = 256 * 4,
+  .priority = (osPriority_t) osPriorityHigh,
+};
+/* Definitions for ori_semaphore */
+osSemaphoreId_t orientation_Semaphore_Handler;
+const osSemaphoreAttr_t orientation_Semaphore_Attributes = {
+  .name = "ori_semaphore"
+};
+/* USER CODE BEGIN PV */
+uint8_t started = 0;
+
+float orientation = 0;
+
+double position_X = 0;
+double position_Y = 0;
+
+float ultrasound_Distance_Change_X  = 0;
+float ultrasound_Distance_Change_Y = 0;
+
+char oled_Buffer[20];
+uint8_t buffer[20];
+
+uint16_t echo_Up_Edge = 65535;
+uint16_t echo_Down_Edge = 65535;
+int32_t echo, last_Echo1, last_Echo2;
+uint8_t ultrasonic_Alert = 0;
+int32_t echo_To_Obstacle;
+double distance_To_Obstacle = 10000;	// Distance to nearesr obstacle detected by ultrasound (cm)
+int request_Distance = 0;				// Flag: if != 0, us will actively measuring distance
+int distance_Ready = 0;				// Set to 1 when us finished active measurement
+
+Instruction current_Instruction;
+CompleteError complete_Error;
+uint8_t turn_Direction = 0xFF;
+double distance_To_Obstacle_Minimum = 25;
+
+MotorData motor_A;
+MotorData motor_B;
+MotorPIDData motor_A_PID;
+MotorPIDData motor_B_PID;
+
+MotorServoStatus backupObj;
+
+AccelGyroResult gyro;
+/* USER CODE END PV */
+
+/* Private function prototypes -----------------------------------------------*/
+void SystemClock_Config(void);
+static void MX_GPIO_Init(void);
+static void MX_TIM8_Init(void);
+static void MX_I2C1_Init(void);
+static void MX_TIM2_Init(void);
+static void MX_TIM3_Init(void);
+static void MX_TIM1_Init(void);
+static void MX_TIM6_Init(void);
+static void MX_USART3_UART_Init(void);
+static void MX_USART1_UART_Init(void);
+static void MX_ADC1_Init(void);
+static void MX_ADC2_Init(void);
+void start_Default_Task(void *argument);
+void start_Motor_And_Servo(void *argument);
+void start_IMU(void *argument);
+void start_Ultrasound(void *argument);
+
+/* USER CODE BEGIN PFP */
+void delay_Microsecond(uint16_t microsecond);
+void ultrasound_Enable_Active_Measure();
+int get_Infrared_Reading(uint8_t infrared);
+/* USER CODE END PFP */
+
+/* Private user code ---------------------------------------------------------*/
+/* USER CODE BEGIN 0 */
+/* USER CODE END 0 */
+
+/**
+  * @brief  The application entry point.
+  * @infrared_Return_Value int
+  */
+int main(void)
+{
+  /* USER CODE BEGIN 1 */
+
+  /* USER CODE END 1 */
+
+  /* MCU Configuration--------------------------------------------------------*/
+
+  /* Reset of all peripherals, Initializes the Flash interface and the Systick. */
+  HAL_Init();
+
+  /* USER CODE BEGIN Init */
+  /* USER CODE END Init */
+
+  /* Configure the system clock */
+  SystemClock_Config();
+
+  /* USER CODE BEGIN SysInit */
+
+  /* USER CODE END SysInit */
+
+  /* Initialize all configured peripherals */
+  MX_GPIO_Init();
+  MX_TIM8_Init();
+  MX_I2C1_Init();
+  MX_TIM2_Init();
+  MX_TIM3_Init();
+  MX_TIM1_Init();
+  MX_TIM6_Init();
+  MX_USART3_UART_Init();
+  MX_USART1_UART_Init();
+  MX_ADC1_Init();
+  MX_ADC2_Init();
+  /* USER CODE BEGIN 2 */
+  OLED_Init();
+  HAL_TIM_Base_started(&htim6);
+  HAL_TIM_IC_started_IT(&htim1, TIM_CHANNEL_1);
+  comm_init(&huart3, &current_Instruction, &complete_Error);
+  HAL_GPIO_WritePin(GPIOE, LED3_Pin, GPIO_PIN_SET);
+  while (HAL_UART_Receive_IT(&huart3, (uint8_t*) buffer, UART_PACKET_SIZE) != HAL_OK){
+	  HAL_Delay(100);
+	  OLED_Clear();
+	  		sprintf(oled_Buffer, "Uart err: %d", 1);
+	  		OLED_ShowString(10, 15, &oled_Buffer[0]);
+	  		OLED_Refresh_Gram();
+  }
+  OLED_Clear();
+  uint8_t imu_Error = imu_Initialization(&hi2c1);
+	if (imu_Error != 0) {
+	  OLED_Clear();
+		sprintf(oled_Buffer, "Imu err: %d", imu_Error);
+		OLED_ShowString(10, 15, &oled_Buffer[0]);
+		OLED_Refresh_Gram();
+	}
+  motor_Initialization(&htim8, &htim2, &htim3, &motor_A, &motor_B, &motor_A_PID, &motor_B_PID, &backupObj, &orientation, &orientation_Semaphore_Handler);
+  servo_Initialization(&htim1);
+  //HAL_UART_Receive_IT(&huart1, (uint8_t*) buffer, UART_PACKET_SIZE);
+  /* USER CODE END 2 */
+
+  /* Init scheduler */
+  osKernelInitialize();
+
+  /* USER CODE BEGIN RTOS_MUTEX */
+  /* add mutexes, ... */
+  /* USER CODE END RTOS_MUTEX */
+
+  /* Create the semaphores(s) */
+  /* creation of ori_semaphore */
+  orientation_Semaphore_Handler = osSemaphoreNew(1, 1, &orientation_Semaphore_Attributes);
+
+  /* USER CODE BEGIN RTOS_SEMAPHORES */
+  /* add semaphores, ... */
+  /* USER CODE END RTOS_SEMAPHORES */
+
+  /* USER CODE BEGIN RTOS_TIMERS */
+  /* started timers, add new ones, ... */
+  /* USER CODE END RTOS_TIMERS */
+
+  /* USER CODE BEGIN RTOS_QUEUES */
+  /* add queues, ... */
+  /* USER CODE END RTOS_QUEUES */
+
+  /* Create the thread(s) */
+  /* creation of defaultTask */
+  default_Task_Handler = osThreadNew(start_Default_Task, NULL, &default_Task_Attributes);
+
+  /* creation of motorServo */
+  motor_Servo_Handler = osThreadNew(start_Motor_And_Servo, NULL, &motor_Servo_Attributes);
+
+  /* creation of imu */
+  imu_Handler = osThreadNew(start_IMU, NULL, &imu_Attributes );
+
+  /* creation of ultrasound */
+  ultrasound_Handler = osThreadNew(start_Ultrasound, NULL, &ultrasound_Attributes);
+
+  /* USER CODE BEGIN RTOS_THREADS */
+  /* add threads, ... */
+  /* USER CODE END RTOS_THREADS */
+
+  /* USER CODE BEGIN RTOS_EVENTS */
+  /* add events, ... */
+  /* USER CODE END RTOS_EVENTS */
+
+  /* started scheduler */
+  osKernelstarted();
+
+  /* We should never get here as control is now taken by the scheduler */
+  /* Infinite loop */
+  /* USER CODE BEGIN WHILE */
+  while (1)
+  {
+    /* USER CODE END WHILE */
+
+    /* USER CODE BEGIN 3 */
+  }
+  /* USER CODE END 3 */
+}
+
+/**
+  * @brief System Clock Configuration
+  * @infrared_Return_Value None
+  */
+void SystemClock_Config(void)
+{
+  RCC_OscInitTypeDef RCC_OscInitStruct = {0};
+  RCC_ClkInitTypeDef RCC_ClkInitStruct = {0};
+
+  /** Configure the main internal regulator output voltage
+  */
+  __HAL_RCC_PWR_CLK_ENABLE();
+  __HAL_PWR_VOLTAGESCALING_CONFIG(PWR_REGULATOR_VOLTAGE_SCALE1);
+
+  /** Initializes the RCC Oscillators according to the specified parameters
+  * in the RCC_OscInitTypeDef structure.
+  */
+  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSI;
+  RCC_OscInitStruct.HSIState = RCC_HSI_ON;
+  RCC_OscInitStruct.HSICalibrationValue = RCC_HSICALIBRATION_DEFAULT;
+  RCC_OscInitStruct.PLL.PLLState = RCC_PLL_NONE;
+  if (HAL_RCC_OscConfig(&RCC_OscInitStruct) != HAL_OK)
+  {
+    Error_Handler();
+  }
+
+  /** Initializes the CPU, AHB and APB buses clocks
+  */
+  RCC_ClkInitStruct.ClockType = RCC_CLOCKTYPE_HCLK|RCC_CLOCKTYPE_SYSCLK
+                              |RCC_CLOCKTYPE_PCLK1|RCC_CLOCKTYPE_PCLK2;
+  RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_HSI;
+  RCC_ClkInitStruct.AHBCLKDivider = RCC_SYSCLK_DIV1;
+  RCC_ClkInitStruct.APB1CLKDivider = RCC_HCLK_DIV1;
+  RCC_ClkInitStruct.APB2CLKDivider = RCC_HCLK_DIV1;
+
+  if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_0) != HAL_OK)
+  {
+    Error_Handler();
+  }
+}
+
+/**
+  * @brief ADC1 Initialization Function
+  * @param None
+  * @infrared_Return_Value None
+  */
+static void MX_ADC1_Init(void)
+{
+
+  /* USER CODE BEGIN ADC1_Init 0 */
+
+  /* USER CODE END ADC1_Init 0 */
+
+  ADC_ChannelConfTypeDef sConfig = {0};
+
+  /* USER CODE BEGIN ADC1_Init 1 */
+
+  /* USER CODE END ADC1_Init 1 */
+
+  /** Configure the global features of the ADC (Clock, Resolution, Data Alignment and number of conversion)
+  */
+  hadc1.Instance = ADC1;
+  hadc1.Init.ClockPrescaler = ADC_CLOCK_SYNC_PCLK_DIV2;
+  hadc1.Init.Resolution = ADC_RESOLUTION_12B;
+  hadc1.Init.ScanConvMode = DISABLE;
+  hadc1.Init.ContinuousConvMode = ENABLE;
+  hadc1.Init.DiscontinuousConvMode = DISABLE;
+  hadc1.Init.ExternalTrigConvEdge = ADC_EXTERNALTRIGCONVEDGE_NONE;
+  hadc1.Init.ExternalTrigConv = ADC_SOFTWARE_started;
+  hadc1.Init.DataAlign = ADC_DATAALIGN_RIGHT;
+  hadc1.Init.NbrOfConversion = 1;
+  hadc1.Init.DMAContinuousRequests = DISABLE;
+  hadc1.Init.EOCSelection = ADC_EOC_SINGLE_CONV;
+  if (HAL_ADC_Init(&hadc1) != HAL_OK)
+  {
+    Error_Handler();
+  }
+
+  /** Configure for the selected ADC regular channel its corresponding rank in the sequencer and its sample time.
+  */
+  sConfig.Channel = ADC_CHANNEL_11;
+  sConfig.Rank = 1;
+  sConfig.SamplingTime = ADC_SAMPLETIME_3CYCLES;
+  if (HAL_ADC_ConfigChannel(&hadc1, &sConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN ADC1_Init 2 */
+
+  /* USER CODE END ADC1_Init 2 */
+
+}
+
+/**
+  * @brief ADC2 Initialization Function
+  * @param None
+  * @infrared_Return_Value None
+  */
+static void MX_ADC2_Init(void)
+{
+
+  /* USER CODE BEGIN ADC2_Init 0 */
+
+  /* USER CODE END ADC2_Init 0 */
+
+  ADC_ChannelConfTypeDef sConfig = {0};
+
+  /* USER CODE BEGIN ADC2_Init 1 */
+
+  /* USER CODE END ADC2_Init 1 */
+
+  /** Configure the global features of the ADC (Clock, Resolution, Data Alignment and number of conversion)
+  */
+  hadc2.Instance = ADC2;
+  hadc2.Init.ClockPrescaler = ADC_CLOCK_SYNC_PCLK_DIV2;
+  hadc2.Init.Resolution = ADC_RESOLUTION_12B;
+  hadc2.Init.ScanConvMode = DISABLE;
+  hadc2.Init.ContinuousConvMode = ENABLE;
+  hadc2.Init.DiscontinuousConvMode = DISABLE;
+  hadc2.Init.ExternalTrigConvEdge = ADC_EXTERNALTRIGCONVEDGE_NONE;
+  hadc2.Init.ExternalTrigConv = ADC_SOFTWARE_started;
+  hadc2.Init.DataAlign = ADC_DATAALIGN_RIGHT;
+  hadc2.Init.NbrOfConversion = 1;
+  hadc2.Init.DMAContinuousRequests = DISABLE;
+  hadc2.Init.EOCSelection = ADC_EOC_SINGLE_CONV;
+  if (HAL_ADC_Init(&hadc2) != HAL_OK)
+  {
+    Error_Handler();
+  }
+
+  /** Configure for the selected ADC regular channel its corresponding rank in the sequencer and its sample time.
+  */
+  sConfig.Channel = ADC_CHANNEL_12;
+  sConfig.Rank = 1;
+  sConfig.SamplingTime = ADC_SAMPLETIME_3CYCLES;
+  if (HAL_ADC_ConfigChannel(&hadc2, &sConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN ADC2_Init 2 */
+
+  /* USER CODE END ADC2_Init 2 */
+
+}
+
+/**
+  * @brief I2C1 Initialization Function
+  * @param None
+  * @infrared_Return_Value None
+  */
+static void MX_I2C1_Init(void)
+{
+
+  /* USER CODE BEGIN I2C1_Init 0 */
+
+  /* USER CODE END I2C1_Init 0 */
+
+  /* USER CODE BEGIN I2C1_Init 1 */
+
+  /* USER CODE END I2C1_Init 1 */
+  hi2c1.Instance = I2C1;
+  hi2c1.Init.ClockSpeed = 100000;
+  hi2c1.Init.DutyCycle = I2C_DUTYCYCLE_2;
+  hi2c1.Init.OwnAddress1 = 0;
+  hi2c1.Init.AddressingMode = I2C_ADDRESSINGMODE_7BIT;
+  hi2c1.Init.DualAddressMode = I2C_DUALADDRESS_DISABLE;
+  hi2c1.Init.OwnAddress2 = 0;
+  hi2c1.Init.GeneralCallMode = I2C_GENERALCALL_DISABLE;
+  hi2c1.Init.NoStretchMode = I2C_NOSTRETCH_DISABLE;
+  if (HAL_I2C_Init(&hi2c1) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN I2C1_Init 2 */
+
+  /* USER CODE END I2C1_Init 2 */
+
+}
+
+/**
+  * @brief TIM1 Initialization Function
+  * @param None
+  * @infrared_Return_Value None
+  */
+static void MX_TIM1_Init(void)
+{
+
+  /* USER CODE BEGIN TIM1_Init 0 */
+
+  /* USER CODE END TIM1_Init 0 */
+
+  TIM_ClockConfigTypeDef sClockSourceConfig = {0};
+  TIM_MasterConfigTypeDef sMasterConfig = {0};
+  TIM_IC_InitTypeDef sConfigIC = {0};
+  TIM_OC_InitTypeDef sConfigOC = {0};
+  TIM_BreakDeadTimeConfigTypeDef sBreakDeadTimeConfig = {0};
+
+  /* USER CODE BEGIN TIM1_Init 1 */
+
+  /* USER CODE END TIM1_Init 1 */
+  htim1.Instance = TIM1;
+  htim1.Init.Prescaler = 15;
+  htim1.Init.CounterMode = TIM_COUNTERMODE_UP;
+  htim1.Init.Period = 20000;
+  htim1.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
+  htim1.Init.RepetitionCounter = 0;
+  htim1.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_ENABLE;
+  if (HAL_TIM_Base_Init(&htim1) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sClockSourceConfig.ClockSource = TIM_CLOCKSOURCE_INTERNAL;
+  if (HAL_TIM_ConfigClockSource(&htim1, &sClockSourceConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  if (HAL_TIM_IC_Init(&htim1) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  if (HAL_TIM_PWM_Init(&htim1) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sMasterConfig.MasterOutputTrigger = TIM_TRGO_RESET;
+  sMasterConfig.MasterSlaveMode = TIM_MASTERSLAVEMODE_DISABLE;
+  if (HAL_TIMEx_MasterConfigSynchronization(&htim1, &sMasterConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sConfigIC.ICPolarity = TIM_INPUTCHANNELPOLARITY_BOTHEDGE;
+  sConfigIC.ICSelection = TIM_ICSELECTION_DIRECTTI;
+  sConfigIC.ICPrescaler = TIM_ICPSC_DIV1;
+  sConfigIC.ICFilter = 0;
+  if (HAL_TIM_IC_ConfigChannel(&htim1, &sConfigIC, TIM_CHANNEL_1) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sConfigOC.OCMode = TIM_OCMODE_PWM1;
+  sConfigOC.Pulse = 0;
+  sConfigOC.OCPolarity = TIM_OCPOLARITY_HIGH;
+  sConfigOC.OCFastMode = TIM_OCFAST_DISABLE;
+  sConfigOC.OCIdleState = TIM_OCIDLESTATE_RESET;
+  sConfigOC.OCNIdleState = TIM_OCNIDLESTATE_RESET;
+  if (HAL_TIM_PWM_ConfigChannel(&htim1, &sConfigOC, TIM_CHANNEL_4) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sBreakDeadTimeConfig.OffStateRunMode = TIM_OSSR_DISABLE;
+  sBreakDeadTimeConfig.OffStateIDLEMode = TIM_OSSI_DISABLE;
+  sBreakDeadTimeConfig.LockLevel = TIM_LOCKLEVEL_OFF;
+  sBreakDeadTimeConfig.DeadTime = 0;
+  sBreakDeadTimeConfig.BreakState = TIM_BREAK_DISABLE;
+  sBreakDeadTimeConfig.BreakPolarity = TIM_BREAKPOLARITY_HIGH;
+  sBreakDeadTimeConfig.AutomaticOutput = TIM_AUTOMATICOUTPUT_DISABLE;
+  if (HAL_TIMEx_ConfigBreakDeadTime(&htim1, &sBreakDeadTimeConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN TIM1_Init 2 */
+
+  /* USER CODE END TIM1_Init 2 */
+  HAL_TIM_MspPostInit(&htim1);
+
+}
+
+/**
+  * @brief TIM2 Initialization Function
+  * @param None
+  * @infrared_Return_Value None
+  */
+static void MX_TIM2_Init(void)
+{
+
+  /* USER CODE BEGIN TIM2_Init 0 */
+
+  /* USER CODE END TIM2_Init 0 */
+
+  TIM_Encoder_InitTypeDef sConfig = {0};
+  TIM_MasterConfigTypeDef sMasterConfig = {0};
+
+  /* USER CODE BEGIN TIM2_Init 1 */
+
+  /* USER CODE END TIM2_Init 1 */
+  htim2.Instance = TIM2;
+  htim2.Init.Prescaler = 0;
+  htim2.Init.CounterMode = TIM_COUNTERMODE_UP;
+  htim2.Init.Period = 65535;
+  htim2.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
+  htim2.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
+  sConfig.EncoderMode = TIM_ENCODERMODE_TI12;
+  sConfig.IC1Polarity = TIM_ICPOLARITY_FALLING;
+  sConfig.IC1Selection = TIM_ICSELECTION_DIRECTTI;
+  sConfig.IC1Prescaler = TIM_ICPSC_DIV1;
+  sConfig.IC1Filter = 10;
+  sConfig.IC2Polarity = TIM_ICPOLARITY_FALLING;
+  sConfig.IC2Selection = TIM_ICSELECTION_DIRECTTI;
+  sConfig.IC2Prescaler = TIM_ICPSC_DIV1;
+  sConfig.IC2Filter = 10;
+  if (HAL_TIM_Encoder_Init(&htim2, &sConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sMasterConfig.MasterOutputTrigger = TIM_TRGO_RESET;
+  sMasterConfig.MasterSlaveMode = TIM_MASTERSLAVEMODE_DISABLE;
+  if (HAL_TIMEx_MasterConfigSynchronization(&htim2, &sMasterConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN TIM2_Init 2 */
+
+  /* USER CODE END TIM2_Init 2 */
+
+}
+
+/**
+  * @brief TIM3 Initialization Function
+  * @param None
+  * @infrared_Return_Value None
+  */
+static void MX_TIM3_Init(void)
+{
+
+  /* USER CODE BEGIN TIM3_Init 0 */
+
+  /* USER CODE END TIM3_Init 0 */
+
+  TIM_Encoder_InitTypeDef sConfig = {0};
+  TIM_MasterConfigTypeDef sMasterConfig = {0};
+
+  /* USER CODE BEGIN TIM3_Init 1 */
+
+  /* USER CODE END TIM3_Init 1 */
+  htim3.Instance = TIM3;
+  htim3.Init.Prescaler = 0;
+  htim3.Init.CounterMode = TIM_COUNTERMODE_UP;
+  htim3.Init.Period = 65535;
+  htim3.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
+  htim3.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
+  sConfig.EncoderMode = TIM_ENCODERMODE_TI12;
+  sConfig.IC1Polarity = TIM_ICPOLARITY_FALLING;
+  sConfig.IC1Selection = TIM_ICSELECTION_DIRECTTI;
+  sConfig.IC1Prescaler = TIM_ICPSC_DIV1;
+  sConfig.IC1Filter = 10;
+  sConfig.IC2Polarity = TIM_ICPOLARITY_FALLING;
+  sConfig.IC2Selection = TIM_ICSELECTION_DIRECTTI;
+  sConfig.IC2Prescaler = TIM_ICPSC_DIV1;
+  sConfig.IC2Filter = 10;
+  if (HAL_TIM_Encoder_Init(&htim3, &sConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sMasterConfig.MasterOutputTrigger = TIM_TRGO_RESET;
+  sMasterConfig.MasterSlaveMode = TIM_MASTERSLAVEMODE_DISABLE;
+  if (HAL_TIMEx_MasterConfigSynchronization(&htim3, &sMasterConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN TIM3_Init 2 */
+
+  /* USER CODE END TIM3_Init 2 */
+
+}
+
+/**
+  * @brief TIM6 Initialization Function
+  * @param None
+  * @infrared_Return_Value None
+  */
+static void MX_TIM6_Init(void)
+{
+
+  /* USER CODE BEGIN TIM6_Init 0 */
+
+  /* USER CODE END TIM6_Init 0 */
+
+  TIM_MasterConfigTypeDef sMasterConfig = {0};
+
+  /* USER CODE BEGIN TIM6_Init 1 */
+
+  /* USER CODE END TIM6_Init 1 */
+  htim6.Instance = TIM6;
+  htim6.Init.Prescaler = 15;
+  htim6.Init.CounterMode = TIM_COUNTERMODE_UP;
+  htim6.Init.Period = 65535;
+  htim6.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
+  if (HAL_TIM_Base_Init(&htim6) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sMasterConfig.MasterOutputTrigger = TIM_TRGO_RESET;
+  sMasterConfig.MasterSlaveMode = TIM_MASTERSLAVEMODE_DISABLE;
+  if (HAL_TIMEx_MasterConfigSynchronization(&htim6, &sMasterConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN TIM6_Init 2 */
+
+  /* USER CODE END TIM6_Init 2 */
+
+}
+
+/**
+  * @brief TIM8 Initialization Function
+  * @param None
+  * @infrared_Return_Value None
+  */
+static void MX_TIM8_Init(void)
+{
+
+  /* USER CODE BEGIN TIM8_Init 0 */
+
+  /* USER CODE END TIM8_Init 0 */
+
+  TIM_ClockConfigTypeDef sClockSourceConfig = {0};
+  TIM_MasterConfigTypeDef sMasterConfig = {0};
+  TIM_OC_InitTypeDef sConfigOC = {0};
+  TIM_BreakDeadTimeConfigTypeDef sBreakDeadTimeConfig = {0};
+
+  /* USER CODE BEGIN TIM8_Init 1 */
+
+  /* USER CODE END TIM8_Init 1 */
+  htim8.Instance = TIM8;
+  htim8.Init.Prescaler = 0;
+  htim8.Init.CounterMode = TIM_COUNTERMODE_UP;
+  htim8.Init.Period = 7199;
+  htim8.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
+  htim8.Init.RepetitionCounter = 0;
+  htim8.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
+  if (HAL_TIM_Base_Init(&htim8) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sClockSourceConfig.ClockSource = TIM_CLOCKSOURCE_INTERNAL;
+  if (HAL_TIM_ConfigClockSource(&htim8, &sClockSourceConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  if (HAL_TIM_PWM_Init(&htim8) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sMasterConfig.MasterOutputTrigger = TIM_TRGO_RESET;
+  sMasterConfig.MasterSlaveMode = TIM_MASTERSLAVEMODE_DISABLE;
+  if (HAL_TIMEx_MasterConfigSynchronization(&htim8, &sMasterConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sConfigOC.OCMode = TIM_OCMODE_PWM1;
+  sConfigOC.Pulse = 0;
+  sConfigOC.OCPolarity = TIM_OCPOLARITY_HIGH;
+  sConfigOC.OCNPolarity = TIM_OCNPOLARITY_HIGH;
+  sConfigOC.OCFastMode = TIM_OCFAST_DISABLE;
+  sConfigOC.OCIdleState = TIM_OCIDLESTATE_RESET;
+  sConfigOC.OCNIdleState = TIM_OCNIDLESTATE_RESET;
+  if (HAL_TIM_PWM_ConfigChannel(&htim8, &sConfigOC, TIM_CHANNEL_1) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  if (HAL_TIM_PWM_ConfigChannel(&htim8, &sConfigOC, TIM_CHANNEL_2) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sBreakDeadTimeConfig.OffStateRunMode = TIM_OSSR_DISABLE;
+  sBreakDeadTimeConfig.OffStateIDLEMode = TIM_OSSI_DISABLE;
+  sBreakDeadTimeConfig.LockLevel = TIM_LOCKLEVEL_OFF;
+  sBreakDeadTimeConfig.DeadTime = 0;
+  sBreakDeadTimeConfig.BreakState = TIM_BREAK_DISABLE;
+  sBreakDeadTimeConfig.BreakPolarity = TIM_BREAKPOLARITY_HIGH;
+  sBreakDeadTimeConfig.AutomaticOutput = TIM_AUTOMATICOUTPUT_DISABLE;
+  if (HAL_TIMEx_ConfigBreakDeadTime(&htim8, &sBreakDeadTimeConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN TIM8_Init 2 */
+
+  /* USER CODE END TIM8_Init 2 */
+
+}
+
+/**
+  * @brief USART1 Initialization Function
+  * @param None
+  * @infrared_Return_Value None
+  */
+static void MX_USART1_UART_Init(void)
+{
+
+  /* USER CODE BEGIN USART1_Init 0 */
+
+  /* USER CODE END USART1_Init 0 */
+
+  /* USER CODE BEGIN USART1_Init 1 */
+
+  /* USER CODE END USART1_Init 1 */
+  huart1.Instance = USART1;
+  huart1.Init.BaudRate = 115200;
+  huart1.Init.WordLength = UART_WORDLENGTH_8B;
+  huart1.Init.StopBits = UART_STOPBITS_1;
+  huart1.Init.Parity = UART_PARITY_NONE;
+  huart1.Init.Mode = UART_MODE_TX_RX;
+  huart1.Init.HwFlowCtl = UART_HWCONTROL_NONE;
+  huart1.Init.OverSampling = UART_OVERSAMPLING_16;
+  if (HAL_UART_Init(&huart1) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN USART1_Init 2 */
+
+  /* USER CODE END USART1_Init 2 */
+
+}
+
+/**
+  * @brief USART3 Initialization Function
+  * @param None
+  * @infrared_Return_Value None
+  */
+static void MX_USART3_UART_Init(void)
+{
+
+  /* USER CODE BEGIN USART3_Init 0 */
+
+  /* USER CODE END USART3_Init 0 */
+
+  /* USER CODE BEGIN USART3_Init 1 */
+
+  /* USER CODE END USART3_Init 1 */
+  huart3.Instance = USART3;
+  huart3.Init.BaudRate = 115200;
+  huart3.Init.WordLength = UART_WORDLENGTH_8B;
+  huart3.Init.StopBits = UART_STOPBITS_1;
+  huart3.Init.Parity = UART_PARITY_NONE;
+  huart3.Init.Mode = UART_MODE_TX_RX;
+  huart3.Init.HwFlowCtl = UART_HWCONTROL_NONE;
+  huart3.Init.OverSampling = UART_OVERSAMPLING_16;
+  if (HAL_UART_Init(&huart3) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN USART3_Init 2 */
+
+  /* USER CODE END USART3_Init 2 */
+
+}
+
+/**
+  * @brief GPIO Initialization Function
+  * @param None
+  * @infrared_Return_Value None
+  */
+static void MX_GPIO_Init(void)
+{
+  GPIO_InitTypeDef GPIO_InitStruct = {0};
+/* USER CODE BEGIN MX_GPIO_Init_1 */
+/* USER CODE END MX_GPIO_Init_1 */
+
+  /* GPIO Ports Clock Enable */
+  __HAL_RCC_GPIOE_CLK_ENABLE();
+  __HAL_RCC_GPIOC_CLK_ENABLE();
+  __HAL_RCC_GPIOA_CLK_ENABLE();
+  __HAL_RCC_GPIOB_CLK_ENABLE();
+
+  /*Configure GPIO pin Output Level */
+  HAL_GPIO_WritePin(GPIOE, GPIO_PIN_5|GPIO_PIN_6|GPIO_PIN_7|GPIO_PIN_8
+                          |LED3_Pin, GPIO_PIN_RESET);
+
+  /*Configure GPIO pin Output Level */
+  HAL_GPIO_WritePin(GPIOA, AIN2_Pin|AIN1_Pin|BIN1_Pin|BIN2_Pin, GPIO_PIN_RESET);
+
+  /*Configure GPIO pin Output Level */
+  HAL_GPIO_WritePin(US_TRIG_GPIO_Port, US_TRIG_Pin, GPIO_PIN_RESET);
+
+  /*Configure GPIO pins : PE5 PE6 PE7 PE8
+                           LED3_Pin */
+  GPIO_InitStruct.Pin = GPIO_PIN_5|GPIO_PIN_6|GPIO_PIN_7|GPIO_PIN_8
+                          |LED3_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(GPIOE, &GPIO_InitStruct);
+
+  /*Configure GPIO pins : AIN2_Pin AIN1_Pin BIN1_Pin BIN2_Pin */
+  GPIO_InitStruct.Pin = AIN2_Pin|AIN1_Pin|BIN1_Pin|BIN2_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_HIGH;
+  HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
+
+  /*Configure GPIO pin : US_TRIG_Pin */
+  GPIO_InitStruct.Pin = US_TRIG_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(US_TRIG_GPIO_Port, &GPIO_InitStruct);
+
+/* USER CODE BEGIN MX_GPIO_Init_2 */
+/* USER CODE END MX_GPIO_Init_2 */
+}
+
+/* USER CODE BEGIN 4 */
+/** Timer Input Capture Interrupt Callback Function **/
+void HAL_TIM_IC_CaptureCallback(TIM_HandleTypeDef *htim) {
+    
+    /** Ultrasound Echo Detection **/
+    // This section is dedicated to handling the echo signal from an ultrasonic sensor.
+    if (htim == &htim1) { // Check if the callback is from the timer associated with ultrasound echo capture
+        
+        // Rising Edge Detection
+        // The first part of the echo capture involves detecting the rising edge of the echo signal.
+        if (echo_Up_Edge > 20000) {
+            // Capture the timestamp at the rising edge of the echo signal
+            echo_Up_Edge = (uint16_t)HAL_TIM_ReadCapturedValue(htim, TIM_CHANNEL_1);
+        } 
+        // Falling Edge Detection
+        else {
+            // Capture the timestamp at the falling edge of the echo signal
+            echo_Down_Edge = (uint16_t)HAL_TIM_ReadCapturedValue(htim, TIM_CHANNEL_1);
+
+            // Echo Pulse Duration Calculation
+            // This section calculates the duration between the rising and falling edges of the echo signal.
+            if (echo_Up_Edge > echo_Down_Edge) {
+                // Adjust for counter overflow by adding the timer's maximum count
+                echo = (echo_Down_Edge + 20000) - echo_Up_Edge;
+            } else {
+                // Directly calculate the echo pulse duration
+                echo = echo_Down_Edge - echo_Up_Edge;
+            }
+
+            // Resetting for Next Capture
+            // Prepares for the next echo signal capture by resetting edge markers
+            echo_Up_Edge = 65535;
+            echo_Down_Edge = 65535;
+
+            /** Distance Measurement Processing **/
+            // Determines if an active or passive distance measurement process is required
+            if (request_Distance > 0) {
+                // Active Measurement Request
+                // Filters out unstable echo measurements to avoid erroneous distance calculation
+                if (((abs(last_Echo1 - echo) > 300) || (abs(last_Echo2 - echo) > 300)) || (abs(last_Echo1 - last_Echo2) > 300)) {
+                    // Echo readings not stable, waiting for stabilization
+                    last_Echo2 = last_Echo1;
+                    last_Echo1 = echo;
+                    return; // Exit the callback to wait for a more stable echo signal
+                }
+                if (ultrasonic_Alert < 5) {
+                    // Collecting multiple echo measurements to average
+                    echo_To_Obstacle += echo;
+                    ultrasonic_Alert++;
+                } else {
+                    // Averaging echo measurements for a more accurate distance calculation
+                    echo_To_Obstacle /= 5; // Average the collected echo values
+                    distance_To_Obstacle = (double)echo_To_Obstacle * 0.01715f; // Convert echo duration to distance
+
+                    // Resetting for Next Measurement
+                    last_Echo1 = 65535;
+                    last_Echo2 = 65535;
+                    
+                    // Checking if the measured distance is within acceptable limits
+                    if (distance_To_Obstacle < distance_To_Obstacle_Minimum) {
+                        // Too close to an obstacle, trigger another measurement
+                        request_Distance = -1;
+                    } else {
+                        // Distance measurement is acceptable
+                        request_Distance = 0;
+                    }
+                    distance_Ready = 1; // Indicate that the distance measurement is ready
+                }
+            } else if (request_Distance == 0) {
+                // Passive Monitoring
+                // Monitors distance passively during navigation and acts if an obstacle is too close
+                if (!complete_Error.finished && (echo * 0.01715f <= distance_To_Obstacle_Minimum)) {
+                    // An obstacle is detected within the predefined safety margin
+                    stopPID(); // Stop the PID control (motor control)
+                    motor_A.suspend = SUS_STOP; // Suspend motor A's operation
+                    motor_B.suspend = SUS_STOP; // Suspend motor B's operation
+                    ultrasound_Enable_Active_Measure(); // Trigger an active distance measurement
+                }
+            }
+        }
+    }
+
+    /** Motor Encoder Position Update **/
+    // Handles the encoder interrupts for both Motor A and Motor B to update their position counts
+    if (htim == &htim2) { // Motor A Encoder
+        // Update Motor A's position based on the encoder count
+        motor_A_PID.count = -(int16_t)__HAL_TIM_GET_COUNTER(htim);
+    }
+    if (htim == &htim3) { // Motor B Encoder
+        // Update Motor B's position based on the encoder count
+        motor_B_PID.count = (int16_t)__HAL_TIM_GET_COUNTER(htim);
+    }
+}
+
+
+
+/** UART Receive Complete Callback **/
+void HAL_UART_RxCpltCallback(UART_HandleTypeDef* huart) {
+    UNUSED(huart); // Macro to avoid unused variable warning for the UART handle
+
+    // Interpret the received data from the camera module
+    turn_Direction = uart_receive_cam((uint8_t*) buffer);
+
+    // Check if the received command is to start (0x80 indicates start command)
+    if (turn_Direction == 0x80) {
+        started = 1; // Set the started flag to indicate that the system should start processing
+        turn_Direction = 0xFF; // Reset turn_Direction to an undefined state for further instructions
+    }
+
+    /** Display Received Data on OLED **/
+    // Clear the OLED display to show new data
+    OLED_Clear();
+    // Format the received bytes into a string and display them on the OLED
+    sprintf(oled_Buffer, "%2x %2x %2x %2x", buffer[0], buffer[1], buffer[2], buffer[3]);
+    OLED_ShowString(10, 15, &oled_Buffer[0]);
+    // Refresh the OLED display to show the latest information
+    OLED_Refresh_Gram();
+
+    // Reset the buffer for the next UART receive operation
+    buffer[0] = 0;
+    buffer[1] = 0;
+    buffer[2] = 0;
+    buffer[3] = 0;
+
+    /** Re-enable UART Reception **/
+    // Re-initiate UART reception interrupt to receive further commands or data
+    HAL_UART_Receive_IT(huart, (uint8_t*) buffer, UART_PACKET_SIZE);
+
+    /*
+    This commented section below shows how you might process received data further, checking if the
+    UART transmission status (uart_stt) was OK, and then displaying various pieces of information 
+    about the current instruction or error states on the OLED. This includes the instruction ID,
+    type, value, or any errors and their codes. This can be helpful for debugging or displaying 
+    status information.
+    */
+	
+	/*
+	if (uart_stt == HAL_OK) {
+		OLED_Clear();
+		sprintf(oled_Buffer, "Id: %d", current_Instruction.id);
+		OLED_ShowString(10, 15, &oled_Buffer[0]);
+		OLED_Refresh_Gram();
+		sprintf(oled_Buffer, "Type: %d", current_Instruction.type);
+		OLED_ShowString(10, 30, &oled_Buffer[0]);
+		OLED_Refresh_Gram();
+		sprintf(oled_Buffer, "Val: %d", current_Instruction.val);
+		OLED_ShowString(10, 45, &oled_Buffer[0]);
+		OLED_Refresh_Gram();
+	}
+	else {
+		OLED_Clear();
+		sprintf(oled_Buffer, "Err: %d", buffer[3]);
+		OLED_ShowString(10, 15, &oled_Buffer[0]);
+		OLED_Refresh_Gram();
+		sprintf(oled_Buffer, "complete_Error: %d", complete_Error.id);
+		OLED_ShowString(10, 30, &oled_Buffer[0]);
+		OLED_Refresh_Gram();
+		sprintf(oled_Buffer, "Fin: %d", complete_Error.finished);
+		OLED_ShowString(10, 45, &oled_Buffer[0]);
+		OLED_Refresh_Gram();
+	}
+	*/
+}
+
+
+void delay_Microsecond(uint16_t us) {
+	__HAL_TIM_SET_COUNTER(&htim6, 0);
+	while (__HAL_TIM_GET_COUNTER(&htim6) < us);
+	return;
+}
+
+/** Enable Active Ultrasound Measurement Process **/
+void ultrasound_Enable_Active_Measure() {
+    // This function initiates an active distance measurement process using the ultrasonic sensor.
+    // It prepares the system to measure distance by resetting relevant variables and setting flags.
+
+    // Reset the flag indicating that a distance measurement is ready.
+    // This ensures that the system knows a new measurement is in progress.
+    distance_Ready = 0;
+
+    // Reset the variable that accumulates echo times for averaging.
+    // This is necessary to start fresh for the new active measurement cycle.
+    echo_To_Obstacle = 0;
+
+    // Reset the calculated distance to obstacle.
+    // Ensures that previous measurements do not interfere with the new measurement.
+    distance_To_Obstacle = 0;
+
+    // Reset the counter that tracks the number of echo signals received.
+    // This is used to accumulate a certain number of echo signals before averaging for stability.
+    ultrasonic_Alert = 0;
+
+    // Set the flag to initiate an active distance measurement.
+    // This tells the system to actively monitor and process the ultrasonic sensor's echo signals to measure distance.
+    request_Distance = 1;
+}
+
+
+/** Retrieve Infrared Sensor Reading **/
+int get_Infrared_Reading(uint8_t infrared) {
+    // This function calculates the average reading from an infrared sensor over multiple samples.
+    // It supports two infrared sensors, identified as LEFT and RIGHT.
+
+    int infrared_Return_Value = 0; // Initialize a variable to accumulate sensor readings.
+
+    // Loop to collect multiple samples for averaging.
+    // 50 samples are collected to smooth out any noise in the sensor readings.
+    for (int i = 0; i < 50; i++) {
+        // Check if the LEFT infrared sensor is selected.
+        if (infrared == LEFT) {
+            // Start the ADC (Analog to Digital Converter) associated with the LEFT sensor.
+            HAL_ADC_Start(&hadc2);
+            // Wait for the ADC conversion to complete with a timeout of 10ms.
+            HAL_ADC_PollForConversion(&hadc2, 10);
+            // Add the converted value to the accumulator.
+            infrared_Return_Value += HAL_ADC_GetValue(&hadc2);
+            // Stop the ADC to save power and prevent interference with other ADC readings.
+            HAL_ADC_Stop(&hadc2);
+        }
+        // Check if the RIGHT infrared sensor is selected.
+        else if (infrared == RIGHT) {
+            // Start the ADC associated with the RIGHT sensor.
+            HAL_ADC_Start(&hadc1);
+            // Wait for the ADC conversion to complete with a timeout of 10ms.
+            HAL_ADC_PollForConversion(&hadc1, 10);
+            // Add the converted value to the accumulator.
+            infrared_Return_Value += HAL_ADC_GetValue(&hadc1);
+            // Stop the ADC to save power and prevent interference with other ADC readings.
+            HAL_ADC_Stop(&hadc1);
+        }
+    }
+
+    // Calculate the average reading by dividing the total by the number of samples.
+    // The function returns this average reading as an integer.
+    return infrared_Return_Value / 50;
+}
+
+
+/* USER CODE END 4 */
+
+/* USER CODE BEGIN Header_start_Default_Task */
+/**
+  * @brief  Function implementing the defaultTask thread.
+  * @param  argument: Not used
+  * @infrared_Return_Value None
+  */
+/* USER CODE END Header_start_Default_Task */
+void start_Default_Task(void *argument)
+{
+  /* USER CODE BEGIN 5 */
+  /* Infinite loop */
+  for(;;)
+  {
+//	  OLED_Clear();
+//	  		sprintf(oled_Buffer, "L: %d", get_Infrared_Reading(LEFT));
+//	  		OLED_ShowString(10, 15, &oled_Buffer[0]);
+//	  		OLED_Refresh_Gram();
+//	  		sprintf(oled_Buffer, "R: %d", get_Infrared_Reading(RIGHT));
+//	  		OLED_ShowString(10, 30, &oled_Buffer[0]);
+//	  		OLED_Refresh_Gram();
+    osDelay(10000);
+//  }
+  }
+  /* USER CODE END 5 */
+}
+
+/* USER CODE BEGIN Header_start_Motor_And_Servo */
+/**
+* @brief Function implementing the motorServo thread.
+* @param argument: Not used
+* @infrared_Return_Value None
+*/
+/* USER CODE END Header_start_Motor_And_Servo */
+void start_Motor_And_Servo(void *argument)
+{
+  /* USER CODE BEGIN start_Motor_And_Servo */
+
+/** Variable Initialization **/
+uint8_t car_Turned = 0; // Flag to track if the car has already turned to avoid an obstacle
+uint8_t select_Infrared_Sensor = 0xFF; // Variable to select between LEFT and RIGHT infrared sensors
+double distance_Before_Running = 0; // Distance measured before the car starts moving towards an obstacle
+double distance_After_Running = 0; // Distance measured after the car has moved towards an obstacle
+double temporary_Distance, width_Of_Second_Obstacle; // Variables to store temporary distances and the width of the second obstacle
+int infrared; // Variable to store the infrared sensor reading
+
+/** IR Sensor Debugging Loop **/
+// This loop is meant for debugging IR sensor readings by continuously displaying them on an OLED screen.
+/*
+for (;;) {
+    OLED_Clear();
+    sprintf(oled_Buffer, "L: %d", get_Infrared_Reading(LEFT));
+    OLED_ShowString(10, 15, &oled_Buffer[0]);
+    OLED_Refresh_Gram();
+    sprintf(oled_Buffer, "R: %d", get_Infrared_Reading(RIGHT));
+    OLED_ShowString(10, 30, &oled_Buffer[0]);
+    OLED_Refresh_Gram();
+    osDelay(200);
+}
+*/
+
+/** Main Loop **/
+for(;;) {
+    // Step 0: Check if the system has been triggered to start
+    if (!started) continue; // Skip the rest of the loop if not started
+
+    /** Step 1: Approach First Obstacle **/
+    // Set a safe minimum distance to maintain from the first obstacle
+    distance_To_Obstacle_Minimum = 30;
+    do {
+        // Trigger an active measurement to get the current distance to the obstacle
+        ultrasound_Enable_Active_Measure();
+        // Wait until the distance measurement is ready
+        while (!distance_Ready) osDelay(10);
+        // Check if the car is within the desired distance range from the obstacle
+        if ((distance_To_Obstacle - distance_To_Obstacle_Minimum > -1) && (distance_To_Obstacle - distance_To_Obstacle_Minimum < 1)) {
+            break; // Exit loop if within range
+        }
+        // Move the car towards the obstacle to adjust the distance
+        complete_Error.finished = 0; // Indicate that a movement command is in progress
+        position_Y += motor_Move_In_CM(distance_To_Obstacle - distance_To_Obstacle_Minimum); // Adjust car's position
+        complete_Error.finished = 1; // Indicate that the movement command has completed
+        // Check if the movement was interrupted (e.g., by an obstacle detected during movement)
+        while ((motor_A.suspend) || (motor_B.suspend)) {
+            while (!distance_Ready) osDelay(10); // Wait for the next distance measurement
+            request_Distance = -1; // Reset the request for a new measurement
+            motor_A.suspend = SUS_OFF; // Resume motor A's operation
+            motor_B.suspend = SUS_OFF; // Resume motor B's operation
+            complete_Error.finished = 0; // Again, indicate that a movement command is in progress
+            position_Y += motor_Move_In_CM(distance_To_Obstacle - distance_To_Obstacle_Minimum); // Make another adjustment
+            complete_Error.finished = 1; // Movement adjustment completed
+        }
+        // Prepare for another distance measurement if necessary
+        ultrasound_Enable_Active_Measure();
+        while (!distance_Ready) osDelay(10);
+    } while((distance_To_Obstacle < distance_To_Obstacle_Minimum) || (distance_To_Obstacle > distance_To_Obstacle_Minimum + 3));
+
+    /** Step 2: Request Assistance from Camera **/
+    // Request information from the camera to decide the direction of the turn to avoid the obstacle
+    uart_Send_Data_To_Camera(1); // The argument might indicate a specific request or command
+    while (turn_Direction == 0xFF); // Wait for the camera to provide the direction to turn
+
+    /** Step 3: Execute Turn to Avoid First Obstacle **/
+    // Based on camera input, execute the turn
+    request_Distance = -1; // Indicate that distance measurement is temporarily not needed
+    if (turn_Direction == LEFT) {
+        // If the decision is to turn left, execute the sequence of movements to turn the car left
+        complete_Error.finished = 0; // Movement command in progress
+        car_Turn(1, 70); // Example command to turn left
+        motor_Move_In_CM(-20); // Move backwards as part of maneuver
+        // Additional commands can be similar to navigate around the obstacle
+        complete_Error.finished = 1; // Indicate completion of turn maneuver
+    }
+    else if (turn_Direction == RIGHT) {
+        // Similar block for turning right
+        complete_Error.finished = 0;
+        car_Turn(1, 290); // Example command to turn right
+        // Followed by similar commands to navigate around the obstacle
+        complete_Error.finished = 1;
+    }
+	
+	
+
+	 // Step 4: Adjust Distance to Second Obstacle Based on Car's Turning Status
+distance_To_Obstacle_Minimum = 27; // Set a new minimum distance based on current situation
+ultrasound_Enable_Active_Measure(); // Begin active ultrasound measurement to get current distance to obstacle
+while (!distance_Ready) osDelay(10); // Wait until the distance measurement is ready
+
+if (distance_To_Obstacle > 150) {
+    // If the measured distance is unexpectedly high, recalculate it
+    distance_To_Obstacle = (double)echo * 0.01715f;
+}
+
+if (distance_To_Obstacle <= 27) {
+    // If the obstacle is closer than or exactly at the minimum distance,
+    // indicate that the car hasn't turned yet and set the minimum distance accordingly
+    car_Turned = 0;
+    distance_To_Obstacle_Minimum = 27;
+} else {
+    // Otherwise, indicate the car has turned and set the minimum distance
+    car_Turned = 1;
+    distance_To_Obstacle_Minimum = 27;
+}
+
+if (distance_To_Obstacle > 150) {
+    // If the recalculated distance is still unexpectedly high, adjust the car's position slightly
+    motor_Move_In_CM(-2);
+    osDelay(200); // Short delay for the adjustment to take effect
+    request_Distance = 0; // Reset distance request status for new measurement
+    complete_Error.finished = 0; // Indicate movement process is starting
+    // Command motors to adjust the car's position with specified direction and speed
+    motor_Set_Parameters_And_Movement(&motor_A, DIR_FWD, 2000);
+    motor_Set_Parameters_And_Movement(&motor_B, DIR_FWD, 2000);
+    complete_Error.finished = 1; // Movement process complete
+    while (!motor_A.suspend) osDelay(10); // Wait if motor A is temporarily suspended
+    while (!distance_Ready) osDelay(10); // Wait for the distance measurement to become ready
+    if (distance_To_Obstacle > 150) {
+        // If the distance remains high, recalculate it again
+        distance_To_Obstacle = (double)echo * 0.01715f;
+    }
+    motor_A.suspend = SUS_OFF; // Ensure motor A is not suspended
+    motor_B.suspend = SUS_OFF; // Ensure motor B is not suspended
+}
+
+// Step 5: Request Direction Decision from Camera
+if (!car_Turned) motor_Move_In_CM(-4); // If car hasn't turned, adjust position slightly
+turn_Direction = 0xFF; // Reset turn direction to await new input
+uart_Send_Data_To_Camera(2); // Request new direction decision from camera
+while (turn_Direction == 0xFF); // Wait for the camera to provide the turn direction
+
+// Step 6: Navigate Around the Second Obstacle
+request_Distance = -1; // Temporarily suspend distance measurement requests
+if (turn_Direction == LEFT) {
+    complete_Error.finished = 0; // Start of movement process
+    if (car_Turned) {
+        // If car has already turned, perform further turning actions
+        car_Turn(1, 90);
+    } else {
+        // If car hasn't turned yet, perform initial turning action
+        turn(90);
+    }
+    complete_Error.finished = 1; // Movement process complete
+    select_Infrared_Sensor = RIGHT; // Select right infrared sensor for subsequent operations
+} else if (turn_Direction == RIGHT) {
+    complete_Error.finished = 0; // Start of movement process
+    if (car_Turned) {
+        // If car has already turned, perform further turning actions
+        car_Turn(1, 270);
+        motor_Move_In_CM(-15); // Move back to create space for turning
+    } else {
+        // If car hasn't turned yet, perform initial turning action
+        turn(270);
+    }
+    complete_Error.finished = 1; // Movement process complete
+    select_Infrared_Sensor = LEFT; // Select left infrared sensor for subsequent operations
+}
+
+
+
+	 // Back to Start of the 2nd Obstacle
+infrared = get_Infrared_Reading(select_Infrared_Sensor); // Get the current infrared sensor reading
+do {
+    // Move the car backwards towards the starting position of the 2nd obstacle
+    motor_Set_Parameters_And_Movement(&motor_A, DIR_BCK, 3000);
+    motor_Set_Parameters_And_Movement(&motor_B, DIR_BCK, 3000);
+    osDelay(10); // Short delay for continuous movement
+    infrared = get_Infrared_Reading(select_Infrared_Sensor); // Update infrared reading
+} while(infrared > 800); // Continue moving until the sensor reading drops below 800, indicating proximity to the obstacle
+mtr_stop(); // Stop the motor movement
+
+// Move Forward to the End of the 2nd Obstacle
+motor_A_init(0xFFFF, 0, 0, 0, 1); // Re-initialize motor A for new movement
+motor_B_init(0xFFFF, 0, 0, 0, 1); // Re-initialize motor B for new movement
+// Begin moving forward towards the end of the 2nd obstacle
+motor_Set_Parameters_And_Movement(&motor_A, DIR_FWD, 3000);
+motor_Set_Parameters_And_Movement(&motor_B, DIR_FWD, 3000);
+osDelay(1000); // Delay to allow movement to proceed
+infrared = get_Infrared_Reading(select_Infrared_Sensor); // Update infrared reading during movement
+while(infrared > 800) {
+    osDelay(10); // Continue checking infrared reading
+    infrared = get_Infrared_Reading(select_Infrared_Sensor);
+}
+mtr_stop(); // Stop the motor once the end of the obstacle is reached based on IR reading
+// Calculate the width of the second obstacle based on the motor counts
+width_Of_Second_Obstacle = ((double)((motor_A_PID.count + motor_B_PID.count) / 2) / CNT_PER_CM);
+
+request_Distance = -1; // Suspend distance measurement request
+// Determine the direction for the car to turn based on previous instructions
+if (turn_Direction == LEFT) {
+    complete_Error.finished = 0; // Indicate movement start
+    car_Turn(3, 270); // Execute car turn
+    complete_Error.finished = 1; // Indicate movement completion
+}
+else if (turn_Direction == RIGHT) {
+    complete_Error.finished = 0; // Indicate movement start
+    car_Turn(3, 105); // Execute car turn
+    complete_Error.finished = 1; // Indicate movement completion
+}
+
+// Step 7: Return Home
+// Move the car forward towards the starting position
+motor_Set_Parameters_And_Movement(&motor_A, DIR_FWD, 3000);
+motor_Set_Parameters_And_Movement(&motor_B, DIR_FWD, 3000);
+osDelay(700); // Delay to allow for significant movement
+if (width_Of_Second_Obstacle > 45) {
+    // If the obstacle's width is larger than 45, stop the car and reassess
+    mtr_stop();
+    request_Distance = -1; // Suspend distance measurement request
+    // Determine the car's turning direction to navigate around the obstacle based on previous logic
+    if (turn_Direction == LEFT) {
+        car_Turn(1, 315);
+        car_Turn(1, 45);
+    }
+    else if (turn_Direction == RIGHT) {
+        car_Turn(1, 45);
+        car_Turn(1, 315);
+    }
+}
+else {
+    // If the obstacle is not too wide, continue moving forward
+    motor_Set_Parameters_And_Movement(&motor_A, DIR_FWD, 3000);
+    motor_Set_Parameters_And_Movement(&motor_B, DIR_FWD, 3000);
+    osDelay(1000);
+}
+// Continue the forward movement towards the start
+motor_Set_Parameters_And_Movement(&motor_A, DIR_FWD, 3000);
+motor_Set_Parameters_And_Movement(&motor_B, DIR_FWD, 3000);
+osDelay(100); // Short delay for adjustment
+
+// Detect the 1st Obstacle and Stop
+infrared = get_Infrared_Reading(select_Infrared_Sensor); // Get the current infrared reading
+// Wait until the infrared reading indicates the car is close enough to stop
+while (infrared <= 800) {
+    osDelay(10);
+    infrared = get_Infrared_Reading(select_Infrared_Sensor);
+}
+while (infrared > 800) {
+    osDelay(10);
+    infrared = get_Infrared_Reading(select_Infrared_Sensor);
+}
+mtr_stop(); // Stop the motor once the obstacle is detected
+
+// Turn Around the 1st Obstacle
+request_Distance = -1; // Suspend distance measurement request
+if (turn_Direction == LEFT) {
+    complete_Error.finished = 0; // Indicate movement start
+    car_Turn(1, 280); // Execute car turn to navigate around the obstacle
+    complete_Error.finished = 1; // Indicate movement completion
+}
+else if (turn_Direction == RIGHT) {
+    complete_Error.finished = 0; // Indicate movement start
+    car_Turn(1, 80); // Execute car turn to navigate around the obstacle
+    complete_Error.finished = 1; // Indicate movement completion
+}
+
+// Move Horizontally Towards the 1st Obstacle
+motor_Set_Parameters_And_Movement(&motor_A, DIR_BCK, 3000);
+motor_Set_Parameters_And_Movement(&motor_B, DIR_BCK, 3000);
+int millisOld = HAL_GetTick(); // Record the current time
+// Move until the infrared reading changes, indicating the car is aligned with the obstacle
+while (HAL_GetTick() - millisOld < 1500) {
+    infrared = get_Infrared_Reading(select_Infrared_Sensor);
+    if (infrared < 800) {
+        osDelay(10);
+    }
+    else {
+        break;
+    }
+}
+// Move the car forward to finalize positioning
+motor_Set_Parameters_And_Movement(&motor_A, DIR_FWD, 3000);
+motor_Set_Parameters_And_Movement(&motor_B, DIR_FWD, 3000);
+infrared = get_Infrared_Reading(select_Infrared_Sensor); // Update the infrared reading
+while (infrared < 800) {
+    infrared = get_Infrared_Reading(select_Infrared_Sensor); // Keep updating the infrared reading
+    osDelay(10);
+}
+
+
+// ** Final Steps: Navigating into the Carpark **
+
+// Step: Turn Towards the Carpark
+motor_Move_In_CM(-17); // Move the car backwards by 17 cm to adjust its position before turning
+request_Distance = -1; // Temporarily disable distance measurement requests during the turn
+if (turn_Direction == RIGHT) {
+    // If the decision is to turn right towards the carpark
+    car_Turn(3, 280); // Execute a right turn with a specific angle and speed
+}
+else if (turn_Direction == LEFT) {
+    // If the decision is to turn left towards the carpark
+    car_Turn(3, 100); // Execute a left turn with a specific angle and speed
+}
+
+// Step: Entering the Carpark
+distance_To_Obstacle_Minimum = 20; // Set the desired minimum distance to obstacle within the carpark
+request_Distance = 0; // Re-enable distance measurement requests
+complete_Error.finished = 0; // Indicate the start of a movement sequence
+motor_Set_Parameters_And_Movement(&motor_A, DIR_FWD, 3000); // Set motor A to move forward with specific parameters
+motor_Set_Parameters_And_Movement(&motor_B, DIR_FWD, 3000); // Set motor B to move forward with specific parameters
+// Wait until both infrared sensors indicate a clear path ahead (no obstacle within 600 units)
+while ((get_Infrared_Reading(RIGHT) <= 600) || (get_Infrared_Reading(LEFT) <= 600)) {
+    osDelay(10); // Small delay to continuously check the infrared readings
+};
+osDelay(700); // Additional delay to ensure the car fully enters the parking space before stopping
+mtr_stop(); // Stop the car's movement
+
+started = 0; // Indicate that the car has completed its current navigation task and is no longer actively navigating
+
+  }
+  /* USER CODE END start_Motor_And_Servo */
+}
+
+/* USER CODE BEGIN Header_start_IMU */
+/**
+* @brief Function implementing the imu thread.
+* @param argument: Not used
+* @infrared_Return_Value None
+*/
+/* USER CODE END Header_start_IMU */
+void start_IMU(void *argument)
+{
+    /* USER CODE BEGIN start_IMU */
+    uint32_t orientation_Lat_Sample_Time = 0; // Variable to store the last sample time for orientation calculation. Used to determine delta time between measurements.
+
+    /* Infinite loop: This loop ensures continuous operation of the IMU reading and processing. */
+    for(;;)
+    {
+        // Calculate the current orientation of the vehicle.
+        // The function 'orientation_Calculation' likely uses gyroscope and accelerometer data to compute the vehicle's orientation in space.
+        orientation = orientation_Calculation(&orientation_Lat_Sample_Time, orientation);
+
+        // Continuously check if there's a request for distance measurement.
+        // If 'request_Distance' is set to a non-negative value, it indicates an active measurement request,
+        // possibly to adjust the vehicle's orientation or for navigational purposes.
+        while (request_Distance >= 0) {
+            // Uncomment the following lines if you wish to display the orientation data on an OLED screen for debugging or monitoring purposes.
+            /*
+            OLED_Clear();
+            sprintf(oled_Buffer, "Ori = %5.1f", orientation);
+            OLED_ShowString(10, 45, &oled_Buffer[0]);
+            OLED_Refresh_Gram();
+            */
+
+            osDelay(5); // Small delay to prevent overwhelming the system with continuous orientation calculations and allows for task switching.
+        }
+    }
+    /* USER CODE END start_IMU */
+}
+
+
+/* USER CODE BEGIN Header_start_Ultrasound */
+/**
+* @brief Function implementing the ultrasound thread.
+* @param argument: Not used
+* @infrared_Return_Value None
+*/
+/* USER CODE END Header_start_Ultrasound */
+
+void start_Ultrasound(void *argument)
+{
+    /* USER CODE BEGIN start_Ultrasound */
+    // Initially reset the trigger pin to ensure a clean start for the ultrasound measurement.
+    HAL_GPIO_WritePin(US_TRIG_GPIO_Port, US_TRIG_Pin, GPIO_PIN_RESET);
+
+    /* Infinite loop: Ensures continuous operation for regular distance measurements. */
+    for(;;)
+    {
+        // Set the trigger pin high to initiate the ultrasound pulse.
+        HAL_GPIO_WritePin(US_TRIG_GPIO_Port, US_TRIG_Pin, GPIO_PIN_SET);
+        // Wait for 10 microseconds as required for the trigger pulse duration.
+        // This duration is necessary for the ultrasound sensor to emit a proper signal.
+        delay_Microsecond(10); 
+        // Reset the trigger pin to low, ending the pulse and allowing the sensor to listen for an echo.
+        HAL_GPIO_WritePin(US_TRIG_GPIO_Port, US_TRIG_Pin, GPIO_PIN_RESET);
+
+        // Wait for 50 milliseconds before the next cycle starts.
+        // This delay allows enough time for the echo to return from an object, ensuring accurate distance measurement.
+        // The specific delay also prevents continuous triggering of the sensor, which could lead to inaccurate readings.
+        osDelay(50);
+    }
+    /* USER CODE END start_Ultrasound */
+}
+
+/**
+  * @brief  This function is executed in case of error occurrence.
+  * @infrared_Return_Value None
+  */
+void Error_Handler(void)
+{
+  /* USER CODE BEGIN Error_Handler_Debug */
+  /* User can add his own implementation to report the HAL error return state */
+  __disable_irq();
+  while (1)
+  {
+  }
+  /* USER CODE END Error_Handler_Debug */
+}
+
+#ifdef  USE_FULL_ASSERT
+/**
+  * @brief  Reports the name of the source file and the source line number
+  *         where the assert_param error has occurred.
+  * @param  file: pointer to the source file name
+  * @param  line: assert_param error line source number
+  * @infrared_Return_Value None
+  */
+void assert_failed(uint8_t *file, uint32_t line)
+{
+  /* USER CODE BEGIN 6 */
+  /* User can add his own implementation to report the file name and line number,
+     ex: printf("Wrong parameters value: file %s on line %d\r\n", file, line) */
+  /* USER CODE END 6 */
+}
+#endif /* USE_FULL_ASSERT */

@@ -1,0 +1,7 @@
+# download dataset
+from roboflow import Roboflow
+from ultralytics import YOLO
+
+rf = Roboflow(api_key="u4JXIOWvvNgQmfMh898D")
+project = rf.workspace("mdp2024ir").project("mdp2024imgrec")
+dataset = project.version(13).download("yolov5")

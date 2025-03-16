@@ -1,0 +1,100 @@
+/*
+ * servo.c
+ *
+ *  Created on: Jan 26, 2024
+ *      Author: Yves Samson
+ */
+#include "servo.h"
+#include "cmsis_os.h"
+
+uint8_t current_Direction; // 0 as left, 1 as straight, 2 as right
+TIM_HandleTypeDef* htim1Ptr;
+
+/**
+ * Function: servo_Initialization
+ * Description: Initializes the servo motor by setting it to specific positions sequentially to ensure proper startup. 
+ *              This function uses the PWM (Pulse Width Modulation) technique to control the servo's position. It gradually
+ *              moves the servo from one end to the other and then sets it to a neutral position as part of the initialization process.
+ * 
+ * Process:
+ * 1. PWM Start:
+ *    - Associates the function parameter `htim` (a pointer to the TIM handle) with a global pointer `htim1Ptr` for later use.
+ *    - Initiates PWM on the specified timer channel (TIM_CHANNEL_4) to control the servo. This step prepares the PWM mechanism for use.
+ * 
+ * 2. Servo Positioning:
+ *    - Sets the servo to three distinct positions sequentially, using delays between each position change to allow the servo to
+ *      physically move to the new position.
+ *      a. First position (2200): Moves the servo towards one end of its range.
+ *      b. Second position (1000): Moves the servo towards the opposite end of its range.
+ *      c. Neutral position (1520): Sets the servo to a neutral or center position. This is typically the starting position for 
+ *         operations requiring precise control from a known state.
+ * 
+ * 3. Delay Intervals:
+ *    - Uses `HAL_Delay(700)` between servo movements to provide ample time for the servo to reach each target position. These delays 
+ *      are critical to ensure the servo motor has enough time to physically move before changing the target position again.
+ * 
+ * Parameters:
+ * - htim: A pointer to the TIM handle structure that includes all the configuration parameters needed for PWM setup and control. This
+ *         handle is specific to the microcontroller's timer used for PWM output.
+ * 
+ * Global Variables:
+ * - htim1Ptr: Stores the TIM handle pointer for global access, allowing other functions to control the servo using the initialized PWM settings.
+ * - current_Direction: Sets an initial direction state for the servo. This example uses `1` as a placeholder value.
+ * 
+ * Notes:
+ * - The specific values (2200, 1000, 1520) for `CCR4` (Capture/Compare Register 4) depend on the servo's specifications and the timer configuration. 
+ *   Adjust these values according to your servo's datasheet and PWM frequency settings.
+ * - This initialization routine ensures the servo motor is properly reset to a known position before starting the main application tasks, enhancing
+ *   the predictability and reliability of subsequent servo controls.
+ */
+void servo_Initialization(TIM_HandleTypeDef* htim){
+	htim1Ptr = htim;
+	HAL_TIM_PWM_Start(htim, TIM_CHANNEL_4);
+	current_Direction = 1;
+	htim1Ptr->Instance->CCR4=2200;
+	HAL_Delay(700);
+	htim1Ptr->Instance->CCR4=1000;
+	HAL_Delay(700);
+	htim1Ptr->Instance->CCR4=1520;
+	HAL_Delay(700);
+
+}
+
+
+void turn_Left(){
+	htim1Ptr->Instance->CCR4=962;
+	current_Direction = LEFT;
+	osDelay(700);
+}
+void turn_Right(){
+	htim1Ptr->Instance->CCR4=2200;
+	current_Direction = RIGHT;
+	osDelay(700);
+}
+void turn_Straight(){
+	if(current_Direction == LEFT){
+		htim1Ptr->Instance->CCR4=1548;
+		osDelay(700);
+	}else if(current_Direction == RIGHT){
+		htim1Ptr->Instance->CCR4=1457;
+		osDelay(700);
+	}else{
+		return;
+	}
+	current_Direction = STRAIGHT;
+}
+void turn_Servo(uint8_t target){
+	if(target == LEFT){
+		turn_Left();
+	}else if(target == STRAIGHT){
+		turn_Straight();
+	}else{
+		turn_Right();
+	}
+}
+uint8_t get_Servo_Direction() {
+	return current_Direction;
+}
+
+
+

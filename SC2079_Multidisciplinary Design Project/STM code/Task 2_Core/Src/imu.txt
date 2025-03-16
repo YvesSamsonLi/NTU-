@@ -1,0 +1,411 @@
+#include "imu.h"
+#include "oled.h"
+#include "stdlib.h"
+
+/* Global variables */
+/*----------------------------------------------------------------*/
+
+I2C_HandleTypeDef* hi2c1_ptr;	// Pointer to hi2c1 object in main
+uint8_t current_Bank = 4;					// Current user bank
+
+/*----------------------------------------------------------------*/
+
+/* Global config values (may change) */
+/*----------------------------------------------------------------*/
+
+/* Accelerometer */
+/*+++++++++++++++++++++++++++++++++++*/
+
+/* Enable Accel DLPF (default 1) */
+uint8_t accelerometer_Filter_Choice = 1;
+
+/* Digital Low pass filter config (default 0) */
+uint8_t accelerometer_DLPF_Configuration = 0;
+
+/* Accel sample rate = 1125/(1+accelerometer_Sample_Rate_Divider)Hz
+ * Only applicable when accelerometer_Filter_Choice = 1
+ * Default [11:0] = 0
+ */
+uint16_t accelerometer_Sample_Rate_Divider = 0;
+
+/*+++++++++++++++++++++++++++++++++++*/
+
+/* Gyroscope */
+/*+++++++++++++++++++++++++++++++++++*/
+
+/* Gyro scale */
+uint8_t gyroscope_Full_Scale_Select = 0;
+
+/* Enable Gyro DLPF (default 1) */
+uint8_t gyroscope_Filter_Choice = 1;
+
+/* Digital Low pass filter config (default 0) */
+uint8_t gyroscope_DLPF_Configuration = 1;
+
+/* Gyro sample rate = 1.1 kHz/(1+GYRO_SMPLRT_DIV[7:0])
+ * Only applicable when GYRO_FCHOICE = 1
+ * Default: 0x00
+*/
+uint8_t gyroscope_Sample_Rate_Divider = 0;
+
+/*+++++++++++++++++++++++++++++++++++*/
+
+/*----------------------------------------------------------------*/
+
+/**
+ * Function: imu_Initialization
+ * Description: Initializes the IMU (Inertial Measurement Unit) sensor by configuring various settings 
+ * including power management, sample rate dividers, and low pass filters. It also performs device reset, 
+ * wake-up, and self-identification processes, followed by gyroscope calibration.
+ * 
+ * Parameters:
+ * - I2C_HandleTypeDef* hi2c_ptr: Pointer to the I2C handle structure that contains the configuration 
+ *                                information for the specified I2C module.
+ * 
+ * Return:
+ * - uint8_t: Status code where 0 indicates success and any other value indicates the step where initialization failed.
+ */
+uint8_t imu_Initialization(I2C_HandleTypeDef* hi2c_ptr) {
+    hi2c1_ptr = hi2c_ptr; // Assign the provided I2C handle to the global variable for later use.
+
+    // Reset the IMU device
+    if (!write_one_byte(0, B0_PWR_MGMT_1, 0x80 | 0x41)) return 1; // Failure at device reset step.
+
+    current_Bank = get_Current_Bank(); // Retrieve the current register bank after reset.
+
+    HAL_Delay(100); // Wait for the reset process to stabilize.
+
+    // Validate the IMU identity
+    uint8_t device_Id = read_One_Byte(0, 0); 
+    if (device_Id != 0xEA) { // Check if the read ID matches the expected value.
+        return 2; // Failure at device identification step.
+    }
+
+    // Wake up the IMU device
+    if (!write_one_byte(0, B0_PWR_MGMT_1, ~0x40 & 0x41)) return 3; // Failure at wake-up step.
+    HAL_Delay(50); // Short delay after waking up.
+
+    // Enable Output Data Rate (ODR) start-time alignment
+    if (!write_one_byte(2, B2_ODR_ALIGN_EN, 0x01)) return 4; // Failure at setting ODR alignment.
+    HAL_Delay(50); // Short delay after setting ODR alignment.
+
+    // Configure the gyroscope's low pass filter and scale
+    if (!write_one_byte(2, B2_GYRO_CONFIG_1, (((gyroscope_DLPF_Configuration << 2) | gyroscope_Full_Scale_Select) << 1) | gyroscope_Filter_Choice)) return 6; // Failure at setting gyroscope config.
+    HAL_Delay(50); // Short delay after configuring gyroscope.
+
+    // Set the gyroscope sample rate divider
+    if (!write_one_byte(2, B2_GYRO_SMPLRT_DIV, gyroscope_Sample_Rate_Divider)) return 9; // Failure at setting gyroscope sample rate divider.
+    HAL_Delay(50); // Short delay after setting gyroscope sample rate divider.
+
+    // Calibrate the gyroscope to eliminate bias
+    gyroscope_Calliberate(); // Perform gyroscope calibration.
+    HAL_Delay(50); // Short delay after gyroscope calibration.
+
+    return 0; // Indicate successful initialization.
+}
+
+/**
+ * Function: read_One_Byte
+ * Description: Reads a single byte from a specific register on the IMU device.
+ * This function first selects the appropriate bank where the register resides, then
+ * performs an I2C read operation to retrieve the value from the specified register address.
+ *
+ * Parameters:
+ * - uint8_t bank: The bank number where the register is located.
+ * - uint8_t register_Address: The address of the register from which the byte is to be read.
+ *
+ * Return:
+ * - uint8_t: The value read from the register. Returns 0 if the operation fails.
+ */
+uint8_t read_One_Byte(uint8_t bank, uint8_t register_Address) {
+    // Attempt to select the requested bank. If selection fails, return 0.
+    if (!selected_Bank(bank)) return 0;
+    
+    // Buffer to store the data read from the register.
+    uint8_t buffer[1];
+
+    // The address of the register to read from.
+    uint8_t register = register_Address;
+
+    // Transmit the register address we want to read from.
+    if (HAL_I2C_Master_Transmit(hi2c1_ptr, IMU_I2C_ADDR, &register, 1, HAL_MAX_DELAY) == HAL_OK) {
+        // If the transmit was successful, receive the data stored in the register.
+        if (HAL_I2C_Master_Receive(hi2c1_ptr, IMU_I2C_ADDR, buffer, 1, I2C_MAX_DELAY) == HAL_OK) {
+            // If receive was successful, return the data.
+            return buffer[0];
+        }
+    }
+    // If any step fails, return 0.
+    return 0;
+}
+
+/**
+ * Function: write_one_byte
+ * Description: Writes a single byte to a specific register on the IMU device.
+ * Before writing, the function selects the appropriate bank. It then performs an
+ * I2C write operation to send the data to the specified register address.
+ *
+ * Parameters:
+ * - uint8_t bank: The bank number where the register is located.
+ * - uint8_t register_Address: The address of the register where the byte is to be written.
+ * - uint8_t data: The data byte to write to the register.
+ *
+ * Return:
+ * - uint8_t: Returns 1 if the write operation is successful, otherwise returns 0.
+ */
+uint8_t write_one_byte(uint8_t bank, uint8_t register_Address, uint8_t data) {
+    // Attempt to select the requested bank. If selection fails, return 0.
+    if (!selected_Bank(bank)) return 0;
+    
+    // Prepare the buffer with the register address and the data to write.
+    uint8_t buffer[2] = {register_Address, data};
+
+    // Transmit the register address and data to the IMU device.
+    if (HAL_I2C_Master_Transmit(hi2c1_ptr, IMU_I2C_ADDR, buffer, 2, HAL_MAX_DELAY) == HAL_OK) {
+        // If the transmit was successful, return 1.
+        return 1;
+    }
+    // If transmit fails, return 0.
+    return 0;
+}
+
+
+
+/**
+ * Function: selected_Bank
+ * Description: Selects a specific bank for subsequent operations on the IMU device. IMU devices
+ *              often divide their registers into different banks for organizational purposes.
+ *              This function ensures the correct bank is active before attempting to read from
+ *              or write to a register within that bank.
+ *
+ * Parameters:
+ * - uint8_t bank: The bank number to select. Valid bank numbers are usually within a certain range,
+ *                  e.g., 0 to 3 for a device with four banks.
+ *
+ * Return:
+ * - uint8_t: Returns 1 if the bank selection is successful, otherwise returns 0.
+ */
+uint8_t selected_Bank(uint8_t bank) {
+    // Validate the bank number is within the allowable range.
+    if (bank > 3) return 0;
+    
+    // Check if the requested bank is already selected to avoid unnecessary operations.
+    if (current_Bank == bank) return 1;
+    
+    // Prepare the buffer for the I2C transaction. The first byte is the bank selection register,
+    // and the second byte is the bank number, shifted to align with the register's expected format.
+    uint8_t buffer[2] = {REG_BANK_SEL, bank << 4};
+
+    // Transmit the request to change the bank.
+    if (HAL_I2C_Master_Transmit(hi2c1_ptr, IMU_I2C_ADDR, buffer, 2, HAL_MAX_DELAY) == HAL_OK) {
+        // Update the current bank variable on success.
+        current_Bank = bank;
+        return 1;
+    }
+    // Return 0 if the transmit operation fails.
+    return 0;
+}
+
+/**
+ * Function: get_Current_Bank
+ * Description: Retrieves the number of the currently selected bank from the IMU device. This
+ *              function can be used to verify that the correct bank is selected before attempting
+ *              to access specific registers.
+ *
+ * Return:
+ * - uint8_t: The number of the currently selected bank. Returns 4 to indicate an error or that
+ *            the current bank could not be determined.
+ */
+uint8_t get_Current_Bank() {
+    // Buffer to store the data received from the IMU.
+    uint8_t buffer[1];
+
+    // The register address for the bank selection register.
+    uint8_t register = REG_BANK_SEL;
+
+    // Transmit the address of the bank selection register to the IMU.
+    if (HAL_I2C_Master_Transmit(hi2c1_ptr, IMU_I2C_ADDR, &register, 1, HAL_MAX_DELAY) == HAL_OK) {
+        // If the transmit was successful, receive the current bank number.
+        if (HAL_I2C_Master_Receive(hi2c1_ptr, IMU_I2C_ADDR, buffer, 1, HAL_MAX_DELAY) == HAL_OK) {
+            // Extract and return the bank number from the received data.
+            return (buffer[0] >> 4) & 0x3;
+        }
+    }
+    // Return 4 as an error code if either the transmit or receive operation fails.
+    return 4;
+}
+
+
+int16_t read_Raw_Accelerometer_X() {
+	int16_t raw = (int16_t)((read_One_Byte(0, B0_ACCEL_XOUT_H) << 8) | read_One_Byte(0, B0_ACCEL_XOUT_L));
+	return raw;
+}
+
+float read_Accelerometer_X() {
+	int16_t raw = read_Raw_Accelerometer_X();
+	float result = ((float)raw / ACCEL_SENSITIVITY_SCALE) * G;
+	return result;
+}
+
+int16_t read_Raw_Accelerometer_Y() {
+	int16_t raw = (int16_t)((read_One_Byte(0, B0_ACCEL_YOUT_H) << 8) | read_One_Byte(0, B0_ACCEL_YOUT_L));
+	return raw;
+}
+
+float read_Accelerometer_Y() {
+	int16_t raw = read_Raw_Accelerometer_Y();
+	float result = ((float)raw / ACCEL_SENSITIVITY_SCALE) * G;
+	return result;
+}
+
+int16_t read_Raw_Accelerometer_Z() {
+	int16_t raw = (int16_t)((read_One_Byte(0, B0_ACCEL_ZOUT_H) << 8) | read_One_Byte(0, B0_ACCEL_ZOUT_L));
+	return raw;
+}
+
+float read_Accelerometer_Z() {
+	int16_t raw  = read_Raw_Accelerometer_Z();
+	float result = ((float)raw / ACCEL_SENSITIVITY_SCALE) * G;
+	return result;
+}
+
+void read_Accelerometer(AccelGyroResult* accelerometer) {
+	accelerometer->x = read_Accelerometer_X();
+	accelerometer->y = read_Accelerometer_Y();
+	accelerometer->z = read_Accelerometer_Z();
+}
+
+/*
+ * Assumption: Device is initialize on flat surface (ax = ay = 0, az = g)
+ */
+void caliberate_Accelerometer() {
+	int32_t accelerometer_Bias_X = 0;
+	int32_t accelerometer_Bias_Y = 0;
+	int32_t accelerometer_Bias_Z = 0;
+	for (int i = 0; i < 100; i++) {
+		accelerometer_Bias_X += read_Raw_Accelerometer_X();
+		accelerometer_Bias_Y += read_Raw_Accelerometer_Y();
+		accelerometer_Bias_Z += read_Raw_Accelerometer_Z();
+	}
+	accelerometer_Bias_X /= 100;
+	accelerometer_Bias_Y /= 100;
+	accelerometer_Bias_Z /= 100;
+	accelerometer_Bias_Z -= ACCEL_SENSITIVITY_SCALE;
+	// Measured scale: 16384 lsb/g. Offset scale: 0.98 mg/lsb. Convert by offset = - measurement / 16
+	accelerometer_Bias_X = -accelerometer_Bias_X / 16;
+	accelerometer_Bias_Y = -accelerometer_Bias_Y / 16;
+	accelerometer_Bias_Z = -accelerometer_Bias_Z / 16;
+	// Get the preloaded offset and add with our custom bias
+	int16_t accel_offset_x = (int16_t)(read_One_Byte(1, B1_XA_OFFS_H) << 8 | read_One_Byte(1, B1_XA_OFFS_L)) >> 1;
+	int16_t accel_offset_y = (int16_t)(read_One_Byte(1, B1_YA_OFFS_H) << 8 | read_One_Byte(1, B1_YA_OFFS_L)) >> 1;
+	int16_t accel_offset_z = (int16_t)(read_One_Byte(1, B1_ZA_OFFS_H) << 8 | read_One_Byte(1, B1_ZA_OFFS_L)) >> 1;
+
+	accelerometer_Bias_X += accel_offset_x;
+	accelerometer_Bias_Y += accel_offset_y;
+	accelerometer_Bias_Z += accel_offset_z;
+
+	// Separate accel_bias into 2 part: [14:7] and [6:0]
+	uint8_t accel_bias_x_h = (uint8_t)(accelerometer_Bias_X >> 7);
+	uint8_t accel_bias_x_l = (uint8_t)(accelerometer_Bias_X << 1);
+	uint8_t accel_bias_y_h = (uint8_t)(accelerometer_Bias_Y >> 7);
+	uint8_t accel_bias_y_l = (uint8_t)(accelerometer_Bias_Y << 1);
+	uint8_t accel_bias_z_h = (uint8_t)(accelerometer_Bias_Z >> 7);
+	uint8_t accel_bias_z_l = (uint8_t)(accelerometer_Bias_Z << 1);
+	// Write to registers
+	write_one_byte(1, B1_XA_OFFS_H, accel_bias_x_h);
+	write_one_byte(1, B1_XA_OFFS_L, accel_bias_x_l);
+	write_one_byte(1, B1_YA_OFFS_H, accel_bias_y_h);
+	write_one_byte(1, B1_YA_OFFS_L, accel_bias_y_l);
+	write_one_byte(1, B1_ZA_OFFS_H, accel_bias_z_h);
+	write_one_byte(1, B1_ZA_OFFS_L, accel_bias_z_l);
+}
+
+int16_t read_Raw_Gyroscope_X() {
+	int16_t raw = (int16_t)((read_One_Byte(0, B0_GYRO_XOUT_H) << 8) | read_One_Byte(0, B0_GYRO_XOUT_L));
+	return raw;
+}
+
+float read_Gyroscope_X() {
+	int16_t raw = read_Raw_Gyroscope_X();
+	float result = (float)raw / GYRO_SENSITIVITY_SCALE;
+	return result;
+}
+
+int16_t read_Raw_Gyroscope_Y() {
+	int16_t raw = (int16_t)((read_One_Byte(0, B0_GYRO_YOUT_H) << 8) | read_One_Byte(0, B0_GYRO_YOUT_L));
+	return raw;
+}
+
+float read_Gyroscope_Y() {
+	int16_t raw = read_Raw_Gyroscope_Y();
+	float result = (float)raw / GYRO_SENSITIVITY_SCALE;
+	return result;
+}
+
+int16_t read_Raw_Gyroscope_Z() {
+	int16_t raw = (int16_t)((read_One_Byte(0, B0_GYRO_ZOUT_H) << 8) | read_One_Byte(0, B0_GYRO_ZOUT_L));
+	return raw;
+}
+
+float read_Gyroscope_Z() {
+	int16_t raw = read_Raw_Gyroscope_Z();
+	float result = (float)raw / GYRO_SENSITIVITY_SCALE;
+	return result;
+}
+
+void read_Gyroscope(AccelGyroResult* gyroscope) {
+	gyroscope->x = read_Gyroscope_X();
+	gyroscope->y = read_Gyroscope_Y();
+	gyroscope->z = read_Gyroscope_Z();
+}
+
+void gyroscope_Calliberate() {
+	int32_t gyroscope_Bias_X = 0;
+	int32_t gyroscope_Bias_Y = 0;
+	int32_t gyroscope_Bias_Z = 0;
+	for (int i = 0; i < 100; i++) {
+		gyroscope_Bias_X += read_Raw_Gyroscope_X();
+		gyroscope_Bias_Y += read_Raw_Gyroscope_Y();
+		gyroscope_Bias_Z += read_Raw_Gyroscope_Z();
+	}
+	gyroscope_Bias_X /= 100;
+	gyroscope_Bias_Y /= 100;
+	gyroscope_Bias_Z /= 100;
+	// Step size for offset register: 0.0305 dps/LSB; Offset = Measurement / 4;
+	gyroscope_Bias_X = -gyroscope_Bias_X / 4;
+	gyroscope_Bias_Y = -gyroscope_Bias_Y / 4;
+	gyroscope_Bias_Z = -gyroscope_Bias_Z / 4;
+	/*gyroscope_Bias_X = -gyroscope_Bias_X * 2;
+	gyroscope_Bias_Y = -gyroscope_Bias_Y * 2;
+	gyroscope_Bias_Z = -gyroscope_Bias_Z * 2;*/
+	// Separate gyro_bias into 2 parts: [15:8] and [7:0]
+	uint8_t gyro_bias_x_h = (uint8_t)(gyroscope_Bias_X >> 8);
+	uint8_t gyro_bias_x_l = (uint8_t)gyroscope_Bias_X;
+	uint8_t gyro_bias_y_h = (uint8_t)(gyroscope_Bias_Y >> 8);
+	uint8_t gyro_bias_y_l = (uint8_t)gyroscope_Bias_Y;
+	uint8_t gyro_bias_z_h = (uint8_t)(gyroscope_Bias_Z >> 8);
+	uint8_t gyro_bias_z_l = (uint8_t)gyroscope_Bias_Z;
+	// Write to registers
+	write_one_byte(2, B2_XG_OFFS_USRH, gyro_bias_x_h);
+	write_one_byte(2, B2_XG_OFFS_USRL, gyro_bias_x_l);
+	write_one_byte(2, B2_YG_OFFS_USRH, gyro_bias_y_h);
+	write_one_byte(2, B2_YG_OFFS_USRL, gyro_bias_y_l);
+	write_one_byte(2, B2_ZG_OFFS_USRH, gyro_bias_z_h);
+	write_one_byte(2, B2_ZG_OFFS_USRL, gyro_bias_z_l);
+}
+
+float orientation_Calculation(uint32_t* last_Sample_Time, float last_Sample_Orientation) {
+	float angular_Speed = 0;
+	angular_Speed += read_Gyroscope_Z();
+	if (abs(angular_Speed) < MIN_ANG_SPD)
+		angular_Speed = 0;
+	uint32_t current_Time = HAL_GetTick();
+	uint16_t dt = current_Time - (*last_Sample_Time);
+	*last_Sample_Time = current_Time;
+	float result = last_Sample_Orientation + angular_Speed * dt / 1000;
+	while (result >= 360)
+		result -= 360;
+	while (result < 0)
+		result += 360;
+	return result;
+}

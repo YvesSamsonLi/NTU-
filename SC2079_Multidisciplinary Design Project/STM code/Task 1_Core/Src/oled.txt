@@ -1,0 +1,231 @@
+#include "oled.h"
+
+#include "stdlib.h"
+
+#include "oledfont.h"
+
+uint8_t OLED_GRAM[128][8];	 
+void OLED_Refresh_Gram(void)
+{
+	uint8_t i,n;		    
+	for(i=0;i<8;i++)  
+	{  
+		OLED_WR_Byte (0xb0+i,OLED_CMD);    
+		OLED_WR_Byte (0x00,OLED_CMD);      
+		OLED_WR_Byte (0x10,OLED_CMD);        
+		for(n=0;n<128;n++)OLED_WR_Byte(OLED_GRAM[n][i],OLED_DATA); 
+	}   
+}
+
+void OLED_WR_Byte(uint8_t dat,uint8_t cmd)
+{	
+	uint8_t i;			  
+	if(cmd)
+	  OLED_RS_Set();
+	else 
+	  OLED_RS_Clr();		  
+	for(i=0;i<8;i++)
+	{			  
+		OLED_SCLK_Clr();
+		if(dat&0x80)
+		   OLED_SDIN_Set();
+		else 
+		   OLED_SDIN_Clr();
+		OLED_SCLK_Set();
+		dat<<=1;   
+	}				 		  
+	OLED_RS_Set();   	  
+} 
+
+/**************************************************************************
+Clear OLED
+**************************************************************************/  
+void OLED_Clear(void)  
+{  
+	uint8_t i,n;  
+	for(i=0;i<8;i++)for(n=0;n<128;n++)OLED_GRAM[n][i]=0X00;  
+	OLED_Refresh_Gram();//Refresh
+}
+
+ /**************************************************************************
+Turn On Display
+**************************************************************************/  
+void OLED_Display_On(void)
+{
+	OLED_WR_Byte(0X8D,OLED_CMD);  //SET DCDC Command
+	OLED_WR_Byte(0X14,OLED_CMD);  //DCDC ON
+	OLED_WR_Byte(0XAF,OLED_CMD);  //DISPLAY ON
+}
+/**************************************************************************
+Turn Off Display
+**************************************************************************/  
+void OLED_Display_Off(void)
+{
+	OLED_WR_Byte(0X8D,OLED_CMD);  //SET DCDC Command
+	OLED_WR_Byte(0X10,OLED_CMD);  //DCDC OFF
+	OLED_WR_Byte(0XAE,OLED_CMD);  //DISPLAY OFF
+}	
+
+/**************************************************************************
+Draw Point
+**************************************************************************/ 
+void OLED_DrawPoint(uint8_t x, uint8_t y, uint8_t z) {
+    uint8_t pos, bx, temp = 0;
+
+    // Check if the coordinates are within the OLED display range
+    if (x > 127 || y > 63)
+        return; // Coordinates out of range
+
+    // Calculate the page (pos) and bit position (bx) based on the y-coordinate
+    pos = 7 - y / 8; // Page number (0-7), calculated from the y-coordinate
+    bx = y % 8;      // Bit position (0-7), calculated from the remainder of y divided by 8
+
+    // Set or clear the bit (pixel) at the specified position
+    temp = 1 << (7 - bx); // Create a bitmask with the bit to be set or cleared
+    if (z)
+        OLED_GRAM[x][pos] |= temp; // Set the bit if z is non-zero (true)
+    else
+        OLED_GRAM[x][pos] &= ~temp; // Clear the bit if z is zero (false)
+}
+
+/**************************************************************************
+Show Char
+**************************************************************************/
+void OLED_ShowChar(uint8_t x, uint8_t y, uint8_t chr, uint8_t size, uint8_t mode) {
+    uint8_t temp, i, j;
+    uint8_t y0 = y; // Store the initial y-coordinate
+
+    chr = chr - ' '; // Convert ASCII character to index in font array
+
+    // Loop through each column of the character
+    for (i = 0; i < size; i++) {
+        // Select the appropriate font array based on the size parameter
+        if (size == 12)
+            temp = oled_asc2_1206[chr][i]; // Use 12x6 font
+        else
+            temp = oled_asc2_1608[chr][i]; // Use 16x8 font
+
+        // Loop through each row (bit) of the character
+        for (j = 0; j < 8; j++) {
+            // Check if the current bit is set (1) or clear (0)
+            if (temp & 0x80)
+                OLED_DrawPoint(x, y, mode); // Draw a point (pixel) at (x, y)
+            else
+                OLED_DrawPoint(x, y, !mode); // Clear a point (pixel) at (x, y)
+
+            temp <<= 1; // Shift the temporary value to the left by 1 bit
+            y++; // Move to the next row (increment y-coordinate)
+
+            // Check if the current column has reached its maximum size
+            if ((y - y0) == size) {
+                y = y0; // Reset y-coordinate to the initial value
+                x++; // Move to the next column (increment x-coordinate)
+                break; // Exit the inner loop
+            }
+        }
+    }
+}
+
+
+uint32_t oled_pow(uint8_t i, uint8_t j) {
+    uint32_t result = 1; // Initialize the result variable to 1
+
+    // Loop 'n' times and multiply 'm' to the result in each iteration
+    while (j--) {
+        result *= i;
+    }
+
+    return result; // Return the final result after 'n' iterations
+}
+
+
+/**************************************************************************
+Show Two Number
+**************************************************************************/
+void OLED_ShowNumber(uint8_t x, uint8_t y, uint32_t num, uint8_t len, uint8_t size) {
+    uint8_t t, temp;
+    uint8_t enshow = 0; // Flag to indicate if leading zeros have been encountered
+
+    // Loop through each digit of the number
+    for (t = 0; t < len; t++) {
+        // Extract each digit from the number starting from the left
+        temp = (num / oled_pow(10, len - t - 1)) % 10;
+
+        // Check if leading zeros need to be skipped
+        if (enshow == 0 && t < (len - 1)) {
+            // Skip leading zeros by displaying empty space
+            if (temp == 0) {
+                OLED_ShowChar(x + (size / 2) * t, y, ' ', size, 1);
+                continue; // Skip to the next iteration of the loop
+            } else {
+                enshow = 1; // Set the flag to indicate that leading zeros have been encountered
+            }
+        }
+
+        // Display the digit character at the appropriate position on the OLED
+        OLED_ShowChar(x + (size / 2) * t, y, temp + '0', size, 1);
+    }
+}
+
+/**************************************************************************
+Show The String
+**************************************************************************/
+void OLED_ShowString(uint8_t x,uint8_t y,const uint8_t *p)
+{
+#define MAX_CHAR_POSX 122
+#define MAX_CHAR_POSY 58          
+    while(*p!='\0')
+    {       
+        if(x>MAX_CHAR_POSX){x=0;y+=16;}
+        if(y>MAX_CHAR_POSY){y=x=0;OLED_Clear();}
+        OLED_ShowChar(x,y,*p,12,1);	 
+        x+=8;
+        p++;
+    }  
+}	 
+
+void OLED_Init(void)
+{
+	HAL_PWR_EnableBkUpAccess(); //Enable access to the RTC and Backup Register
+	__HAL_RCC_LSE_CONFIG(RCC_LSE_OFF); //turn OFF the LSE oscillator, LSERDY flag goes low after 6 LSE oscillator clock cycles.
+	                                   //LSE oscillator switch off to let PC13 PC14 PC15 be IO
+	
+	
+	HAL_PWR_DisableBkUpAccess();
+	
+	OLED_RST_Clr();
+	HAL_Delay(100);
+	OLED_RST_Set();
+	
+	OLED_WR_Byte(0xAE,OLED_CMD); //Off Display
+	
+	OLED_WR_Byte(0xD5,OLED_CMD); //Set Oscillator Division
+	OLED_WR_Byte(80,OLED_CMD);    //[3:0]: divide ratio of the DCLK, [7:4], set the oscillator frequency. Reset
+	OLED_WR_Byte(0xA8,OLED_CMD); //multiplex ratio
+	OLED_WR_Byte(0X3F,OLED_CMD); //duty = 0X3F(1/64) 
+	OLED_WR_Byte(0xD3,OLED_CMD);  //set display offset
+	OLED_WR_Byte(0X00,OLED_CMD); //0
+
+	OLED_WR_Byte(0x40,OLED_CMD); //set display start line [5:0]- from 0-63. RESET
+													
+	OLED_WR_Byte(0x8D,OLED_CMD); //Set charge pump
+	OLED_WR_Byte(0x14,OLED_CMD); //Enable Charge Pump
+	OLED_WR_Byte(0x20,OLED_CMD); //Set Memory Addressing Mode
+	OLED_WR_Byte(0x02,OLED_CMD); //Page Addressing Mode (RESET)
+	OLED_WR_Byte(0xA1,OLED_CMD); //Set segment remap, bit0:0,0->0;1,0->127;
+	OLED_WR_Byte(0xC0,OLED_CMD); //Set COM Output Scan Direction
+	OLED_WR_Byte(0xDA,OLED_CMD); //Set COM Pins
+	OLED_WR_Byte(0x12,OLED_CMD); //[5:4] setting
+	 
+	OLED_WR_Byte(0x81,OLED_CMD); //Contrast Control
+	OLED_WR_Byte(0xEF,OLED_CMD); //1~256; Default: 0X7F
+	OLED_WR_Byte(0xD9,OLED_CMD); //Set Pre-charge Period
+	OLED_WR_Byte(0xf1,OLED_CMD); //[3:0],PHASE 1;[7:4],PHASE 2;
+	OLED_WR_Byte(0xDB,OLED_CMD); //Set VCOMH
+	OLED_WR_Byte(0x30,OLED_CMD);  //[6:4] 000,0.65*vcc;001,0.77*vcc;011,0.83*vcc;
+
+	OLED_WR_Byte(0xA4,OLED_CMD); //Enable display outputs according to the GDDRAM contents
+	OLED_WR_Byte(0xA6,OLED_CMD); //Set normal display   						   
+	OLED_WR_Byte(0xAF,OLED_CMD); //DISPLAY ON	 
+	OLED_Clear(); 
+}

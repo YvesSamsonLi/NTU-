@@ -1,0 +1,223 @@
+# from ServerSockets.socket_server import SocketServer
+# from ServerSockets.bluetooth_connection import BluetoothConnection
+# from ServerSockets.stm_connection import STMConnection
+# import ServerSockets.camera as camera
+from bluetooth import *
+from settings import API_IP, API_PORT
+import time
+from communication.android import AndroidLink, AndroidMessage
+from communication.stm32 import STMLink
+from consts import SYMBOL_MAP
+import json
+from logger import prepare_logger
+import os
+import requests
+import queue
+import time
+from multiprocessing import Process, Manager
+from typing import Optional
+
+
+def snap_and_rec() -> str:
+        """
+        RPi snaps an image and calls the API for image-rec.
+        The response is then forwarded back to the android
+        """
+        print("IN SNAP AND REC")
+        url = f"http://{API_IP}:{API_PORT}/image"
+        filename = f"{int(time.time())}.jpg"
+        
+        
+        con_file    = "PiLCConfig12.txt"
+        Home_Files  = []
+        Home_Files.append('pi')
+        config_file = "/home/" + Home_Files[0]+ "/" + con_file
+
+        extns        = ['jpg','png','bmp','rgb','yuv420','raw']
+        shutters     = [-2000,-1600,-1250,-1000,-800,-640,-500,-400,-320,-288,-250,-240,-200,-160,-144,-125,-120,-100,-96,-80,-60,-50,-48,-40,-30,-25,-20,-15,-13,-10,-8,-6,-5,-4,-3,0.4,0.5,0.6,0.8,1,1.1,1.2,2,3,4,5,6,7,8,9,10,11,15,20,25,30,40,50,60,75,100,112,120,150,200,220,230,239,435]
+        meters       = ['centre','spot','average']
+        awbs         = ['off','auto','incandescent','tungsten','fluorescent','indoor','daylight','cloudy']
+        denoises     = ['off','cdn_off','cdn_fast','cdn_hq']
+
+        config = []
+        with open(config_file, "r") as file:
+            line = file.readline()
+            while line:
+                config.append(line.strip())
+                line = file.readline()
+            config = list(map(int,config))
+        mode        = config[0]
+        speed       = config[1]
+        gain        = config[2]
+        brightness  = config[3]
+        contrast    = config[4]
+        red         = config[6]
+        blue        = config[7]
+        ev          = config[8]
+        extn        = config[15]
+        saturation  = config[19]
+        meter       = config[20]
+        awb         = config[21]
+        sharpness   = config[22]
+        denoise     = config[23]
+        quality     = config[24]
+        
+        retry_count = 0
+        
+        while True:
+        
+            retry_count += 1
+        
+            shutter = shutters[speed]
+            if shutter < 0:
+                shutter = abs(1/shutter)
+            sspeed = int(shutter * 1000000)
+            if (shutter * 1000000) - int(shutter * 1000000) > 0.5:
+                sspeed +=1
+                
+            rpistr = "libcamera-still -e " + extns[extn] + " -n -t 100 -o " + filename
+            rpistr += " --brightness " + str(brightness/100) + " --contrast " + str(contrast/100)
+            rpistr += " --shutter " + str(sspeed)
+            if ev != 0:
+                rpistr += " --ev " + str(ev)
+            if sspeed > 1000000 and mode == 0:
+                rpistr += " --gain " + str(gain) + " --immediate "
+            else:    
+                rpistr += " --gain " + str(gain)
+                if awb == 0:
+                    rpistr += " --awbgains " + str(red/10) + "," + str(blue/10)
+                else:
+                    rpistr += " --awb " + awbs[awb]
+            rpistr += " --metering " + meters[meter]
+            rpistr += " --saturation " + str(saturation/10)
+            rpistr += " --sharpness " + str(sharpness/10)
+            rpistr += " --quality " + str(quality)
+            rpistr += " --denoise "    + denoises[denoise]
+
+            os.system(rpistr)
+            
+            
+            #self.logger.debug("Requesting from image API")
+            
+            response = requests.post(url, files={"file": (filename, open(filename,'rb'))})
+
+            if response.status_code != 200:
+                #self.logger.error("Something went wrong when requesting path from image-rec API. Please try again.")
+                return
+
+            results = json.loads(response.content)
+
+            # Higher brightness retry
+            
+            if results['image_id'] != 'NA' or retry_count > 6:
+                break
+            #elif retry_count <= 2:
+                #self.logger.info(f"Image recognition results: {results}")
+                #self.logger.info("Recapturing with same shutter speed...")
+            elif retry_count <= 4:
+
+                #self.logger.info(f"Image recognition results: {results}")
+                #self.logger.info("Recapturing with lower shutter speed...")
+                speed -= 1
+            elif retry_count == 5:
+                #self.logger.info(f"Image recognition results: {results}")
+                #self.logger.info("Recapturing with lower shutter speed...")
+                speed += 3
+        if results['image_id'] != 'NA':    
+            ans = SYMBOL_MAP.get(results['image_id'])
+            #self.logger.info(f"Image recognition results: {results} ({ans})")
+        else:
+            ans = "NA"
+        return ans
+
+def check_imgrec_api() -> bool:
+        url = f"http://{API_IP}:{API_PORT}/status"
+        try:
+            response = requests.get(url, timeout=1)
+            if response.status_code == 200:
+                #self.logger.debug("API is up!")
+                return True
+        except ConnectionError:
+            #self.logger.warning("API Connection Error")
+            return False
+        except requests.Timeout:
+            #self.logger.warning("API Timeout")
+            return False
+        except Exception as e:
+            #self.logger.warning(f"API Exception: {e}")
+            return False
+
+if __name__ == '__main__':
+
+    '''
+    Flow:
+
+    1. Connect all devices
+    2. Receive Map Data from Android Tablet
+    '''
+
+
+    # Initialize AndroidLink
+    android_link = AndroidLink()
+    android_link.connect()
+
+    # Initialize STMLink
+    stm_link = STMLink()
+    stm_link.connect()
+
+    # STM Connection Setup with provided settings
+    #stm = STMLink()
+    #stm.setup(port='/dev/serial/by-id/usb-Silicon_Labs_CP2102_USB_to_UART_Bridge_Controller_0002-if00-port0', baud_rate=115200)
+
+    # Camera setup with API connection
+    check_imgrec_api()
+
+    print('Ready to Begin!!!!')
+    start_instruction= android_link.recv()
+    if start_instruction:
+        stm_link.send(start_instruction) # send instruction to STM to start the task, can be '1'
+    print("BEFORE WHILE")
+    #Reached the first obstacle
+    while True:
+        
+        if stm_link.recv() == b'CAM': ## FIRST ACKNOWLEDGE = REACH FIRST OBSTACLE
+            # KEEP CHECKING FOR STM MESSAGE TILL OBSTACLE REACHED NOTIFICATION
+            break
+    print("AFTER WHILE")
+    arrow1 = snap_and_rec()
+    print("AFTER SNAP")
+    if arrow1 == "Left Arrow":
+        stm_link.send('L') ## 1 = 1st obstacle LEFT
+       
+
+    elif arrow1 == "Right Arrow":
+        stm_link.send('R') ## 2 = 1st obstacle RIGHT
+
+    else:
+        print("image rec failed")
+        stm_link.send('L') ## If image reg fails, just turn left
+
+    while True:
+        if stm_link.recv() == b'CAM': ## SECOND ACKNOWLEDGE = REACH SECOND OBSTACLE
+            # KEEP CHECKING FOR STM MESSAGE TILL OBSTACLE REACHED NOTIFICATION
+            break
+
+    arrow2 = snap_and_rec()
+    if arrow2 == "Left Arrow":
+        stm_link.send('L') ## 3 = 2nd obstacle LEFT
+    elif arrow2 == "Right Arrow":
+        stm_link.send('R') ## 4 = 2nd obstacle RIGHT
+
+    else:
+        print("image rec failed")
+        stm_link.send('L') ## If image reg fails, just turn left
+    
+    url2 = f"http://{API_IP}:{API_PORT}/stitch"
+    requests.get(url2)
+    while True:
+        if stm_link.recv() == b'ACK':
+            break
+    
+    android_link.disconnect()
+    stm_link.disconnect()
+    

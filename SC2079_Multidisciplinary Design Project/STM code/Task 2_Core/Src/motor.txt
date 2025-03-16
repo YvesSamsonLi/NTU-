@@ -1,0 +1,1024 @@
+#include "motors.h"
+#include "main.h"
+#include "servo.h"
+#include "oled.h"
+#include <math.h>
+#include <stdlib.h>
+
+MotorData* motor_A;
+MotorData* motor_B;
+MotorPIDData* motor_A_PID;
+MotorPIDData* motor_B_PID;
+MotorServoStatus* backup;
+float* orientation;
+TIM_HandleTypeDef* htim8Ptr;	// Pointer of the timer for pwm generation (by default should pass &htim8)
+TIM_HandleTypeDef* htim2Ptr;	// Pointer of the timer for motor A encoding (by default should pass &htim2)
+TIM_HandleTypeDef* htim3Ptr;	// Pointer of the timer for motor B encoding (by default should pass &htim3)
+osSemaphoreId_t* orientation_Semaphore_Handle_Pointer;
+
+
+/* Private function prototypes */
+void backup_Reset();
+
+/* All functions */
+
+/**
+ * Function: motor_Initialization
+ * Description: Initializes motor control, encoders, and related PID control structures. This function
+ *              sets up the hardware timers for PWM control of the motors and for capturing encoder
+ *              feedback. It also initializes data structures used for controlling motor speed and direction,
+ *              and sets up PID control parameters.
+ *
+ * Parameters:
+ * - TIM_HandleTypeDef* pwm_htimPtr: Pointer to the PWM timer handle for motor control.
+ * - TIM_HandleTypeDef* encodeA_htimPtr: Pointer to the timer handle for motor A's encoder.
+ * - TIM_HandleTypeDef* encodeB_htimPtr: Pointer to the timer handle for motor B's encoder.
+ * - MotorData* motor_A: Pointer to motor A's data structure.
+ * - MotorData* motor_B: Pointer to motor B's data structure.
+ * - MotorPIDData* motor_A_PID: Pointer to motor A's PID control data structure.
+ * - MotorPIDData* motor_B_PID: Pointer to motor B's PID control data structure.
+ * - MotorServoStatus* backup_Object: Pointer to a backup object for motor servo status.
+ * - float* orientation: Pointer to a shared orientation variable.
+ * - osSemaphoreId_t* orientation_Semaphore_Handle_Pointer: Pointer to a semaphore handle for orientation access synchronization.
+ *
+ */
+void motor_Initialization(TIM_HandleTypeDef* pwm_htimPtr, TIM_HandleTypeDef* encodeA_htimPtr, TIM_HandleTypeDef* encodeB_htimPtr,
+		MotorData* motor_A, MotorData* motor_B, MotorPIDData* motor_A_PID, MotorPIDData* motor_B_PID, MotorServoStatus* backup_Object,
+		float* orientation, osSemaphoreId_t* orientation_Semaphore_Handle_Pointer) {
+
+	// Assign the provided hardware timer pointers to global variables for PWM and encoder control.
+	htim8Ptr = pwm_htimPtr;
+	htim2Ptr = encodeA_htimPtr;
+	htim3Ptr = encodeB_htimPtr;
+
+	// Start the PWM output for motor A and B control using the provided PWM timer.
+	HAL_TIM_PWM_Start(htim8Ptr, PWMA_TIM_CH);
+	HAL_TIM_PWM_Start(htim8Ptr, PWMB_TIM_CH);
+
+	// Start the encoder input capture in interrupt mode for both motor A and B using their respective timers.
+	// This enables the counting of encoder pulses for position and speed feedback.
+	HAL_TIM_Encoder_Start_IT(htim2Ptr, TIM_CHANNEL_ALL);	// Uses Channel 1 and 2 for motor A.
+	HAL_TIM_Encoder_Start_IT(htim3Ptr, TIM_CHANNEL_ALL);	// Uses Channel 1 and 2 for motor B.
+
+	// Initialize motor data structures with default values or parameters. This includes
+	// setting initial speed, direction, and control flags for motors A and B.
+	motor_A_Initialization(0, 0, 0, 0, 1); // Initializes motor A with default parameters.
+	motor_B_Initialization(0, 0, 0, 0, 1); // Initializes motor B with default parameters.
+
+	// Assign the provided pointers to the global variables for motor data, PID data, and backup status.
+	// to assign pointers to themselves. A review and correction might be needed.
+	motor_A = motor_A;
+	motor_B = motor_B;
+	motor_A_PID = motor_A_PID;
+	motor_B_PID = motor_B_PID;
+	backup = backup_Object;
+
+	// Resets the backup status to a known state.
+	backup_Reset();
+
+	// Assign the provided orientation and semaphore handle to global variables. 
+	// These are used for shared access and synchronization of the orientation value between different tasks or interrupt routines.
+	orientation = orientation;
+	orientation_Semaphore_Handle_Pointer = orientation_Semaphore_Handle_Pointer;
+
+}
+
+
+
+void backup_Reset() {
+	backup->servoDir = STRAIGHT;
+	backup->mtrADir = DIR_FWD;
+	backup->mtrAPWM = 0;
+	backup->mtrBDir = DIR_FWD;
+	backup->mtrBPWM = 0;
+}
+
+void motor_A_Initialization(int16_t target, int16_t Kp, float Kd, float Ki, uint8_t reset_Timer) {
+
+	if (reset_Timer)
+		__HAL_TIM_SET_COUNTER(htim2Ptr, 0);
+
+	motor_A->dir = DIR_FWD;
+	motor_A->pwmVal = 0;
+
+	motor_A_PID->count = -(int16_t)__HAL_TIM_GET_COUNTER(htim2Ptr);       		// Counter (signed value)
+	motor_A_PID->target = target;
+	motor_A_PID->error = motor_A_PID->target - motor_A_PID->count;
+	motor_A_PID->error_area = 0;  		// area under error - to calculate I for PI implementation
+	motor_A_PID->error_old = 0; 			// to calculate D for PID control
+	motor_A_PID->millisOld = HAL_GetTick();			// to calculate I and D for PID control
+	motor_A_PID->Kp = Kp;
+	motor_A_PID->Kd = Kd;
+	motor_A_PID->Ki = Ki;
+}
+
+void motor_B_Initialization(int16_t target, int16_t Kp, float Kd, float Ki, uint8_t reset_Timer) {
+
+	if (reset_Timer)
+		__HAL_TIM_SET_COUNTER(htim3Ptr, 0);
+
+	motor_B->dir = DIR_FWD;
+	motor_B->pwmVal = 0;
+
+	motor_B_PID->count = (int16_t)__HAL_TIM_GET_COUNTER(htim3Ptr);       		// Counter (signed value)
+	motor_B_PID->target = target;
+	motor_B_PID->error = motor_B_PID->target - motor_B_PID->count;
+	motor_B_PID->error_area = 0;  		// area under error - to calculate I for PI implementation
+	motor_B_PID->error_old = 0; 			// to calculate D for PID control
+	motor_B_PID->millisOld = HAL_GetTick();			// to calculate I and D for PID control
+	motor_B_PID->Kp = Kp;
+	motor_B_PID->Kd = Kd;
+	motor_B_PID->Ki = Ki;
+}
+
+/**
+ * Function: motor_A_Initialization
+ * Description: Initializes the control parameters and state for motor A. It sets the PID control
+ *              parameters (proportional, integral, derivative gains) and resets the encoder counter
+ *              if required. This function is responsible for setting up the initial state and control
+ *              behavior of motor A based on the given target speed or position, PID coefficients,
+ *              and whether to reset the encoder counter to zero.
+ *
+ * Parameters:
+ * - int16_t target: The target speed or position for motor A.
+ * - int16_t Kp: Proportional gain for the PID controller.
+ * - float Kd: Derivative gain for the PID controller.
+ * - float Ki: Integral gain for the PID controller.
+ * - uint8_t reset_Timer: Flag to reset the encoder counter (1 = reset, 0 = do not reset).
+ */
+void motor_A_Initialization(int16_t target, int16_t Kp, float Kd, float Ki, uint8_t reset_Timer) {
+    // Reset the encoder counter to zero if requested.
+	if (reset_Timer)
+		__HAL_TIM_SET_COUNTER(htim2Ptr, 0);
+
+	// Initialize motor A's direction and PWM value.
+	motor_A->dir = DIR_FWD; // Set the initial direction to forward.
+	motor_A->pwmVal = 0; // Initialize PWM value to 0 (motor stopped).
+
+	// Initialize motor A's PID control variables.
+	motor_A_PID->count = -(int16_t)__HAL_TIM_GET_COUNTER(htim2Ptr); // Current encoder count (position).
+	motor_A_PID->target = target; // Set target speed or position.
+	motor_A_PID->error = motor_A_PID->target - motor_A_PID->count; // Initial error based on target and current position.
+	motor_A_PID->error_area = 0;  // Initialize integral error (area under error curve).
+	motor_A_PID->error_old = 0;  // Initialize previous error for derivative calculation.
+	motor_A_PID->millisOld = HAL_GetTick(); // Record the current time for time-based calculations.
+	motor_A_PID->Kp = Kp; // Set proportional gain.
+	motor_A_PID->Kd = Kd; // Set derivative gain.
+	motor_A_PID->Ki = Ki; // Set integral gain.
+}
+
+/**
+ * Function: motor_B_Initialization
+ * Description: Similar to motor_A_Initialization, this function initializes the control parameters
+ *              and state for motor B. It prepares motor B for operation based on the given target,
+ *              PID control parameters, and optionally resets the encoder counter. This setup is crucial
+ *              for achieving desired motor speed and position control through PID feedback mechanisms.
+ *
+ * Parameters:
+ * - int16_t target: The target speed or position for motor B.
+ * - int16_t Kp, float Kd, float Ki: PID control parameters as described above.
+ * - uint8_t reset_Timer: Indicates if the encoder counter should be reset.
+ *
+ * The description and parameter explanations are analogous to those of motor_A_Initialization.
+ * Both functions ensure that motors A and B are correctly initialized with PID control parameters
+ * for precise speed and position control.
+ */
+
+void motor_B_Move(uint8_t direction, uint16_t speed) {
+
+	// Backward
+	if (direction == DIR_BCK) {
+		MOTOR_BIN1_Clr();
+		MOTOR_BIN2_Set();
+	}
+	// Forward
+	else {
+		MOTOR_BIN1_Set();
+		MOTOR_BIN2_Clr();
+	}
+
+	// Set speed
+	if (speed > MAX_SPEED) speed = MAX_SPEED;
+	__HAL_TIM_SET_COMPARE(htim8Ptr, PWMB_TIM_CH, speed);
+}
+
+
+/* Set params and stop both motors */
+void motor_Stop() {
+	motor_A->dir = DIR_FWD;
+	motor_A->pwmVal = 0;
+	motor_B->dir = DIR_FWD;
+	motor_B->pwmVal = 0;
+	motor_A_Move(DIR_FWD, 0);
+	motor_B_Move(DIR_FWD, 0);
+	turn_Servo(STRAIGHT);
+	osDelay(100);
+}
+
+/**
+ * Function: motor_Move
+ * Description: Controls the movement of a specified motor (either motor A or motor B) based on its
+ *              direction and PWM value. If the motor is currently suspended, it stops the motor and then
+ *              continues its operation. This function determines which motor to operate and then calls
+ *              the respective function to move that motor in the desired direction with the specified PWM value.
+ *
+ * Parameters:
+ * - MotorData* motor: A pointer to the motor's data structure containing its current state and control parameters.
+ *
+ * Process:
+ * 1. Check if the motor is suspended: If the motor's `suspend` flag is greater than 0, the motor is
+ *    currently in a suspended state, and it needs to be stopped and then resumed. This ensures the motor
+ *    does not operate while it should be paused for any reason.
+ * 2. Determine which motor is being referred to: The function checks if the pointer `motor` refers to `motor_A`
+ *    or `motor_B`. Based on this check, it calls either `motor_A_Move` or `motor_B_Move` to perform the actual
+ *    movement operation.
+ *    - motor_A_Move/motor_B_Move: These functions take the direction and PWM value from the `motor` structure
+ *      and apply them to control the motor's movement.
+ * 3. Move the specified motor: The motor is moved in the specified direction with the given PWM value, controlling
+ *    its speed and direction. This allows for precise control of the motor's behavior in the system.
+ */
+void motor_Move(MotorData* motor) {
+    // Check if the motor is currently suspended.
+	if (motor->suspend > 0) {
+	    // Stop the motor's movement and then resume operation.
+		motor_Stop();
+		motor_Continue();
+		return;
+	}
+	
+	// Determine which motor is being controlled and move it accordingly.
+	if (motor == motor_A)  {
+	    // Move motor A in the specified direction with the given PWM value.
+		motor_A_Move(motor->dir, motor->pwmVal);
+	}
+	else if (motor == motor_B) {
+	    // Move motor B in the specified direction with the given PWM value.
+		motor_B_Move(motor->dir, motor->pwmVal);
+	}
+}
+
+
+void motor_Set_Parameters_And_Movement(MotorData* motor, uint8_t direction, uint32_t pwm_Value) {
+	motor->dir = direction;
+	motor->pwmVal = pwm_Value;
+	motor_Move(motor);
+}
+
+/**
+ * Function: motor_Suspend
+ * Description: Temporarily suspends the operation of both motors based on the specified mode. It can be used to 
+ *              pause motor activities in scenarios like obstacle detection. Depending on the mode, it may also 
+ *              save the current state (direction and PWM value) of the motors and the servo direction for later recovery.
+ *
+ * Parameters:
+ * - uint8_t mode: The suspension mode to be applied. Modes can indicate whether the motors should simply stop or
+ *                 take specific actions (like moving backward). Mode values are predefined, such as SUS_OFF, SUS_BACK,
+ *                 SUS_STOP, etc.
+ *
+ * Process:
+ * 1. Validate Mode: Checks if the provided mode is within the acceptable range. If not, the function returns early without
+ *    taking any action.
+ * 2. Check Current Suspend State: If either motor is already suspended (not in SUS_OFF state), the function returns early
+ *    to avoid overlapping suspend commands or conflicts.
+ * 3. Indicate Suspension: Turns off a specific LED (LED3) on GPIOE as an indicator that suspension has been activated.
+ * 4. Apply Suspension: Sets the suspension mode for both motor A and motor B to the provided mode.
+ * 5. Backup Current State (if needed): If the mode requires halting or moving backward (SUS_BACK or SUS_STOP), the function
+ *    saves the current directions and PWM values of both motors, as well as the current direction of the servo, to a backup
+ *    structure. This allows the system to restore these parameters later.
+ * 6. Stop Motors: Calls motor_Stop() to immediately stop both motors' movements as part of the suspension process.
+ */
+void motor_Suspend(uint8_t mode) {
+    // Validate the mode is within the acceptable range.
+	if (mode > 3) return;
+
+    // Return if suspension is already in effect or being resolved.
+	if ((motor_A->suspend != SUS_OFF) || (motor_B->suspend != SUS_OFF)) return;
+
+    // Reset a specific LED to indicate suspension.
+	HAL_GPIO_WritePin(GPIOE, LED3_Pin, GPIO_PIN_RESET);
+
+    // Set the suspension mode for both motors.
+	motor_A->suspend = mode;
+	motor_B->suspend = mode;
+
+    // Backup current motor and servo states if needed.
+	if ((mode == SUS_BACK) || (mode == SUS_STOP)) {
+	    // Save the current servo direction and motors' directions and PWM values.
+		backup->servoDir = getServoDir();
+		backup->mtrADir = motor_A->dir;
+		backup->mtrAPWM = motor_A->pwmVal;
+		backup->mtrBDir = motor_B->dir;
+		backup->mtrBPWM = motor_B->pwmVal;
+	}
+
+    // Stop both motors as part of the suspension process.
+	motor_Stop();
+}
+
+
+/*
+ * Restore movement, is called in motor_Move() if the suspend status is on
+ */
+ 
+ 
+/**
+ * Function: motor_Continue
+ * Description: Resumes motor operations after a suspension, either by restoring the previous movement state or handling 
+ *              specific post-suspension actions based on the suspension mode. This function is used to recover from a 
+ *              temporary halt or maneuver required by obstacles or operational adjustments.
+ *
+ * Process:
+ * 1. Check Suspension State: Ensures that the motors are actually in a suspended state. If not, it returns immediately 
+ *    without taking any action.
+ * 2. Handle SOS Back or StopPID Modes: If the motors were suspended with a need for a special operation (SOSBack for 
+ *    moving backwards to a safe distance or StopPID for stopping PID control without resuming previous movements), 
+ *    it performs those actions.
+ *    - SOSBack: Calls mtr_SOSBack() to move the robot slightly backward for safety. This is used for avoiding obstacles.
+ *    - StopPID: Calls stop_PID() to halt PID control on motors, useful in scenarios where precise control needs to be paused.
+ * 3. Restore Movement: If the suspension was due to moving back (SUS_BACK), the function restores the robot's movement to 
+ *    its state before the suspension. This involves setting the servo direction back to its previous state, and restoring 
+ *    the direction and PWM values for both motors to their pre-suspension values.
+ * 4. Resume Movement: Commands both motors to resume movement with their restored direction and PWM values, effectively 
+ *    continuing the robot's movement as it was before the suspension.
+ * 5. Reset Backup: Calls backup_Reset() to clear the backup structure, ensuring that no outdated data is retained for future 
+ *    operations.
+ * 6. Clear Suspension: Resets the suspension status for both motors, allowing them to operate normally again.
+ * 7. Indicate Resumption: Sets an LED (LED3 on GPIOE) to indicate that the motors have resumed normal operation.
+ */
+void motor_Continue() {
+    // Ensure the motors are actually suspended.
+	if (!motor_A->suspend) return; // Not suspended or possibly an error state.
+
+    // Special handling for SUS_BACK or SUS_STOPPID suspension modes.
+	if ((motor_A->suspend == SUS_BACK) || (motor_A->suspend == SUS_STOPPID)) {
+		mtr_SOSBack(); // Perform SOSBack if needed.
+	}
+
+    // If the suspension was to stop PID control, stop it without restoring previous movement.
+	if (motor_A->suspend == SUS_STOPPID) {
+		stop_PID();
+	} else { // Otherwise, restore the previous movement state.
+		turn_Servo(backup->servoDir); // Restore servo direction.
+		motor_A->dir = backup->mtrADir; // Restore motor A direction.
+		motor_A->pwmVal = backup->mtrAPWM; // Restore motor A PWM value.
+		motor_B->dir = backup->mtrBDir; // Restore motor B direction.
+		motor_B->pwmVal = backup->mtrBPWM; // Restore motor B PWM value.
+
+        // Resume movement for both motors.
+		motor_A_Move(motor_A->dir, motor_A->pwmVal);
+		motor_B_Move(motor_B->dir, motor_B->pwmVal);
+	}
+
+    // Reset the backup data.
+	backup_Reset();
+
+    // Clear suspension flags for both motors.
+	motor_A->suspend = 0;
+	motor_B->suspend = 0;
+
+    // Indicate resumption of normal operation.
+	HAL_GPIO_WritePin(GPIOE, LED3_Pin, GPIO_PIN_SET);
+}
+
+
+/**
+ * Function: motor_SOS_Back
+ * Description: Executes an emergency maneuver to move the robot backwards for a short distance. This function is 
+ *              typically called when the robot detects that it is too close to an obstacle, requiring immediate 
+ *              action to prevent a collision. After moving back, the motors are stopped to re-assess the situation.
+ *
+ * Process:
+ * 1. Move Backwards: Sets both motors (motor A and motor B) to move backwards at a predefined PWM speed value of 1800. 
+ *    This speed is chosen to ensure a quick yet controlled retreat from the obstacle.
+ * 2. Delay: Waits for 500 milliseconds to allow the robot to move back for a short but sufficient distance. This duration 
+ *    is set based on the speed and the desired distance to move back.
+ * 3. Stop Motors: Calls the motor_Stop() function to halt both motors, ensuring the robot stops moving backwards. This 
+ *    is necessary to prevent moving too far back and to prepare for the next set of commands based on the new position.
+ * 4. Calculate Distance Moved: Calculates the distance the robot has moved back by using the SOSBACK_DIST_CNT constant, 
+ *    which represents the count of encoder ticks during the SOS back maneuver. This count is then converted to 
+ *    centimeters using the CNT_PER_CM constant for easier interpretation.
+ * 
+ * Returns: 
+ * - The distance moved back during the SOS maneuver, in centimeters. This value can be used for logging, display, or 
+ *   further decision-making processes in the robot's control algorithm.
+ */
+float motor_SOS_Back() {
+    // Initiate a controlled move backwards for both motors.
+	motor_A_Move(DIR_BCK, 1800); // Motor A moves backwards with PWM = 1800.
+	motor_B_Move(DIR_BCK, 1800); // Motor B moves backwards with PWM = 1800.
+
+    // Wait for 500 milliseconds to move back a short distance.
+	osDelay(500);
+
+    // Stop both motors to halt the backward movement.
+	motor_Stop();
+
+    // Return the distance moved back, converted from encoder counts to centimeters.
+	return SOSBACK_DIST_CNT / CNT_PER_CM;
+}
+
+
+/**
+ * Function: motor_Move_Continuous
+ * Description: Controls the continuous movement of two motors (motor A and motor B) towards specific target positions
+ *              using PID (Proportional-Integral-Derivative) control. The function initializes both motors with target 
+ *              positions and PID coefficients, then continuously adjusts the motor speeds based on the PID control 
+ *              algorithm until both motors reach their target positions within a defined error margin.
+ *
+ * Process:
+ * 1. Initialize Motors: Sets up both motors (A and B) with target positions and PID parameters. The PID parameters (Kp, Kd, Ki)
+ *    are chosen to regulate the speed and precision of the movement towards the targets. A reset flag is set to reset 
+ *    the encoder counts to zero for accurate movement measurement.
+ * 2. PID Control Loop: Enters a loop where PID control is applied continuously to both motors. The loop checks if the 
+ *    current error (the difference between the target and the current position) for either motor is greater than a 
+ *    predefined maximum allowable error (MAX_PID_ERR). If so, it adjusts the motor speeds accordingly:
+ *    - PID_Control: Calculates the new speed (PWM value) for each motor based on its current error, applying the PID formula.
+ *    - motor_Move: Applies the calculated speed to each motor, making real-time adjustments to reduce the error.
+ * 3. Stop Motors: Once both motors reach their target positions within the allowable error margin, the motors are stopped
+ *    to prevent overshooting.
+ *
+ * Parameters:
+ * - target_A: The target position for motor A in encoder counts.
+ * - target_B: The target position for motor B in encoder counts.
+ *
+ * Note:
+ * The MAX_PID_ERR constant defines the precision of the movement; smaller values result in more precise positioning but
+ * may increase the time taken to reach the target. The chosen PID coefficients (Kp, Kd, Ki) directly impact the control 
+ * behavior, affecting how quickly and smoothly the motors reach their targets.
+ */
+void motor_Move_Continuous(int target_A, int target_B) {
+    // Initialize both motors with targets and PID parameters.
+	motor_A_Initialization((int16_t)target_A, 2, 0.05, 0.0001, 1);
+	motor_B_Initialization((int16_t)target_B, 2, 0.05, 0.0001, 1);
+
+    // Enter loop to apply PID control until error is within acceptable bounds for both motors.
+	while ((abs(motor_A_PID->error) > MAX_PID_ERR) || (abs(motor_B_PID->error) > MAX_PID_ERR)) {
+        // Apply PID control to adjust motor speeds based on current errors.
+		PID_Control(motor_A, motor_A_PID);
+		PID_Control(motor_B, motor_B_PID);
+
+        // Move motors based on the updated speeds from PID control.
+		motor_Move(motor_A);
+		motor_Move(motor_B);
+	}
+
+    // Stop both motors once targets are reached within the allowable error.
+	motor_Stop();
+}
+
+
+/**
+ * Function: motor_Move_Continuous_Correction
+ * Description: This function moves two motors (A and B) to specified target positions with multiple stages of
+ *              PID control for increased accuracy. Initially, it employs more aggressive PID settings to quickly
+ *              approach the targets. Once close, it switches to finer control settings in subsequent stages, allowing
+ *              for precise alignment with minimal overshoot.
+ *
+ * Process:
+ * 1. Initial Approach:
+ *    - Initializes both motors with initial aggressive PID settings for a fast approach.
+ *    - Continuously adjusts motors' speeds based on PID control until the error is within a defined threshold (MAX_PID_ERR).
+ *
+ * 2. Fine Correction Phase 1:
+ *    - After a brief pause, re-initializes both motors with finer PID settings for more precise control.
+ *    - Continues PID adjustments and motor movements until reaching the desired accuracy.
+ *
+ * 3. Fine Correction Phase 2:
+ *    - Following another pause, further refines the PID settings for ultra-fine adjustments.
+ *    - Engages in a final round of PID control to ensure maximum precision.
+ *
+ * 4. Motor Stop:
+ *    - Stops both motors after each phase to assess positioning and prepare for the next correction phase.
+ *
+ * Parameters:
+ * - target_A: Target position for motor A in encoder counts.
+ * - target_B: Target position for motor B in encoder counts.
+ *
+ * Note:
+ * - MAX_PID_ERR: Maximum allowable error margin to consider the motor has reached its target position.
+ * - The function is divided into three distinct phases to ensure that the movement starts with a rapid approach
+ *   and ends with precise positioning. This method is particularly useful for applications requiring high accuracy.
+ * - osDelay between stages allows for any residual movement to settle, ensuring that the next phase starts from a stable condition.
+ */
+void motor_Move_Continuous_Correction(int target_A, int target_B) {
+    // Phase 1: Initial aggressive approach
+    motor_A_Initialization((int16_t)target_A, 1.2, 0.05, 0.0001, 1);
+    motor_B_Initialization((int16_t)target_B, 1.2, 0.05, 0.0001, 1);
+    while ((abs(motor_A_PID->error) > MAX_PID_ERR) || (abs(motor_B_PID->error) > MAX_PID_ERR)) {
+        PID_Control(motor_A, motor_A_PID);
+        PID_Control(motor_B, motor_B_PID);
+        motor_Move(motor_A);
+        motor_Move(motor_B);
+    }
+    motor_Stop();
+    osDelay(700); // Brief pause before next correction phase
+
+    // Phase 2: Fine correction
+    motor_A_Initialization((int16_t)target_A, 0.3, 0, 0.0001, 0);
+    motor_B_Initialization((int16_t)target_B, 0.3, 0, 0.0001, 0);
+    while ((abs(motor_A_PID->error) > MAX_PID_ERR) || (abs(motor_B_PID->error) > MAX_PID_ERR)) {
+        PID_Control(motor_A, motor_A_PID);
+        PID_Control(motor_B, motor_B_PID);
+        motor_Move(motor_A);
+        motor_Move(motor_B);
+    }
+    motor_Stop();
+    osDelay(500); // Another pause for stabilization
+
+    // Phase 3: Ultra-fine correction
+    motor_A_Initialization((int16_t)target_A, 0.1, 0, 0.0001, 0);
+    motor_B_Initialization((int16_t)target_B, 0.1, 0, 0.0001, 0);
+    while ((abs(motor_A_PID->error) > MAX_PID_ERR) || (abs(motor_B_PID->error) > MAX_PID_ERR)) {
+        PID_Control(motor_A, motor_A_PID);
+        PID_Control(motor_B, motor_B_PID);
+        motor_Move(motor_A);
+        motor_Move(motor_B);
+    }
+    motor_Stop(); // Final stop after achieving precise positioning
+}
+
+
+/**
+ * Function: motor_Move_In_CM
+ * Description: This function moves the motors a specified distance in centimeters using PID control for precision.
+ *              It translates the distance from centimeters to encoder counts, commands both motors to move the
+ *              calculated distance, and returns the actual distance moved as averaged between both motors.
+ *
+ * Process:
+ * 1. Distance Calculation:
+ *    - Converts the desired distance from centimeters to encoder counts using the CNT_PER_CM conversion factor.
+ *    - Rounds the calculated distance to the nearest whole number to match encoder count requirements.
+ *
+ * 2. Motor Movement:
+ *    - Invokes the motor_Move_Continuous function with the target distance (in encoder counts) for both motors,
+ *      ensuring synchronized movement.
+ *
+ * 3. Actual Distance Moved:
+ *    - Calculates the average encoder counts moved by both motors and converts it back to centimeters.
+ *    - This average helps account for any discrepancies between the two motors, providing a more accurate
+ *      measurement of the actual distance moved.
+ *
+ * Parameters:
+ * - cm: The desired distance to move in centimeters.
+ *
+ * Returns:
+ * - The actual distance moved, in centimeters, as a double precision floating point value.
+ *
+ * Note:
+ * - CNT_PER_CM: A predefined constant that represents how many encoder counts are equivalent to one centimeter of
+ *   movement. This factor is critical for translating between physical distance and encoder counts.
+ * - The function aims to provide a high-level interface for moving the motors a precise distance, abstracting away
+ *   the details of encoder counts and PID control. It is useful for applications requiring precise linear motion.
+ */
+double motor_Move_In_CM(double cm) {
+    double distance = cm * CNT_PER_CM; // Convert cm to encoder counts
+    distance = round(distance); // Round to nearest whole number for encoder
+    motor_Move_Continuous((int)distance, (int)distance); // Move both motors equally
+    // Calculate the actual distance moved in cm by averaging motor encoder counts
+    return ((motor_A_PID->count + motor_B_PID->count) / 2) / CNT_PER_CM;
+}
+
+
+
+/**
+ * Function: PID_Control
+ * Description: This function implements a PID control loop to adjust the motor's speed and direction based on the
+ *              difference between the target position and the current position (error). It aims to minimize the error
+ *              over time by adjusting the motor's PWM value, thus controlling its speed.
+ *
+ * Process:
+ * 1. Error Evaluation:
+ *    - Calculates the current error as the difference between the target position and the actual position.
+ *    - Determines the direction of movement based on the sign of the error (positive for forward, negative for backward).
+ *
+ * 2. Time Difference Calculation:
+ *    - Computes the time elapsed since the last control loop iteration, which is used in the integral and derivative
+ *      calculations.
+ *
+ * 3. Integral Component:
+ *    - Calculates the cumulative sum of the error over time (error_area), which represents the integral component.
+ *      This helps to eliminate residual steady-state error.
+ *
+ * 4. Derivative Component:
+ *    - Determines the rate of change of error, providing a prediction of future error behavior. This helps to
+ *      dampen the system response and reduce overshoot.
+ *
+ * 5. PID Calculation:
+ *    - Computes the PWM value by applying the PID formula, using the proportional (P), integral (I), and derivative
+ *      (D) components. The PID coefficients (Kp, Ki, Kd) adjust the influence of each component.
+ *    - Limits the PWM value to be within predefined maximum and minimum speed limits.
+ *
+ * 6. Error Handling:
+ *    - If the error is within an acceptable range (less than MAX_PID_ERR), stops the motor by setting the PWM value
+ *      to zero and the direction to forward as a default.
+ *
+ * Parameters:
+ * - motor: A pointer to the MotorData struct for the motor being controlled.
+ * - motor_PID: A pointer to the MotorPIDData struct containing the PID parameters and state for the motor.
+ *
+ * Note:
+ * - MAX_PID_ERR, MAX_SPEED, and MIN_SPEED are predefined constants representing the maximum allowable error, maximum
+ *   speed, and minimum speed, respectively.
+ * - This control loop is called periodically to continuously adjust the motor's speed and direction to achieve the
+ *   target position.
+ */
+void PID_Control(MotorData* motor, MotorPIDData* motor_PID) {
+    // Check if error is beyond a manageable threshold
+    if (abs(motor_PID->error) > MAX_PID_ERR) {
+        // Recalculate error based on current motor position
+        motor_PID->error = motor_PID->target - motor_PID->count;
+
+        // Set motor direction based on sign of error
+        motor->dir = (motor_PID->error > 0) ? DIR_FWD : DIR_BCK;
+
+        // Calculate time elapsed since last PID calculation
+        int32_t current_Milli_Second = HAL_GetTick();
+        int32_t dt = current_Milli_Second - motor_PID->millisOld;
+        motor_PID->millisOld = current_Milli_Second;
+
+        // Update integral component of PID
+        motor_PID->error_area += motor_PID->error * dt;
+
+        // Calculate derivative component of PID
+        int32_t error_Change = motor_PID->error - motor_PID->error_old;
+        motor_PID->error_old = motor_PID->error;
+        float error_Rate = (float)error_Change / dt;
+
+        // Compute PID output and limit speed
+        motor->pwmVal = abs((int32_t)(motor_PID->Kp * motor_PID->error + motor_PID->Ki * motor_PID->error_area + motor_PID->Kd * error_Rate)) / 2;
+        motor->pwmVal = (motor->pwmVal > MAX_SPEED) ? MAX_SPEED : motor->pwmVal;
+        motor->pwmVal = (motor->pwmVal < MIN_SPEED) ? MIN_SPEED : motor->pwmVal;
+    } else {
+        // If error is small, stop the motor
+        motor->dir = DIR_FWD;
+        motor->pwmVal = 0;
+    }
+}
+
+
+void stop_PID() {
+	motor_A_PID->error = 0;
+	motor_B_PID->error = 0;
+	motor_A_PID->target = motor_A_PID->count;
+	motor_B_PID->target = motor_B_PID->count;
+	motor_Stop();
+	// Also clear backup
+	backup->mtrADir = DIR_FWD;
+	backup->mtrBDir = DIR_FWD;
+	backup->mtrAPWM = 0;
+	backup->mtrBPWM = 0;
+	backup->servoDir = STRAIGHT;
+}
+
+/**
+ * Function: slow_Turn
+ * Description: Performs a precise, slow turn based on the specified angle. The turn direction (left or right) is
+ *              determined by the angle's sign and magnitude. The function continuously adjusts the vehicle's orientation
+ *              until the target orientation is achieved within an acceptable error margin.
+ *
+ * Process:
+ * 1. Angle Validation:
+ *    - Checks if the turning angle is too small or invalid and returns early if so.
+ *
+ * 2. Target Orientation Calculation:
+ *    - Calculates the target orientation by adding the turning angle to the current orientation.
+ *    - Ensures the target orientation is within the 0-359 degrees range.
+ *
+ * 3. Turning Logic:
+ *    - Determines the direction to turn based on the angle's magnitude (left for <=180 degrees, right for >180 degrees).
+ *    - Uses a servo to steer and motors to propel the vehicle during the turn.
+ *    - Alternates motor directions (forward and backward) to fine-tune the turning process.
+ *
+ * 4. Orientation Monitoring:
+ *    - Continuously monitors the vehicle's current orientation and compares it to the target orientation.
+ *    - Utilizes a near-zero flag to handle cases where the target orientation is close to 0 degrees.
+ *    - Stops the motors once the target orientation is achieved within a predefined error threshold (MAX_ORI_ERR).
+ *
+ * Parameters:
+ * - turning_Angle: The angle by which the vehicle should turn. Positive for clockwise (right) turns, negative for
+ *                  counter-clockwise (left) turns.
+ *
+ * Global Variables:
+ * - orientation: A pointer to a float representing the vehicle's current orientation in degrees.
+ *
+ * Notes:
+ * - MAX_ORI_ERR is a predefined constant that defines the maximum acceptable error between the target and current
+ *   orientations.
+ * - The function assumes that the servo and motor control functions (turn_Servo, motor_Set_Parameters_And_Movement)
+ *   are defined elsewhere.
+ * - This function is designed for precise, slow turns, making it suitable for situations where accuracy is more
+ *   critical than speed.
+ */
+void slow_Turn(float turning_Angle) {
+    // Initial validation checks
+    if (abs(turning_Angle) < MAX_ORI_ERR || (turning_Angle < 0) || (turning_Angle >= 360)) {
+        return; // Invalid angle, do nothing
+    }
+
+    // Calculate target orientation and normalize to 0-359 range
+    float target_Orientation = (*orientation) + turning_Angle;
+    target_Orientation = fmod(target_Orientation + 360, 360); // Ensures the result is in the 0-359 range
+
+    // Flag to indicate if target is near 0 degrees for special handling
+    uint8_t near_0 = (target_Orientation < MAX_ORI_ERR) || (target_Orientation > 360 - MAX_ORI_ERR);
+
+    // Determine initial motor direction
+    uint8_t motor_Direction = turning_Angle <= 180 ? 1 : 2; // 1: forward, 2: backward for initial setup
+
+    while (motor_Direction) {
+        // Configure servo direction and motor movements for turning
+        if (turning_Angle <= 180) { // Left turn logic
+            // Alternate motor direction and servo orientation for precise adjustment
+            if (motor_Direction == 1) {
+                turn_Servo(LEFT);
+                motor_Set_Parameters_And_Movement(motor_A, DIR_FWD, 1800);
+                motor_Set_Parameters_And_Movement(motor_B, DIR_FWD, 1800);
+                motor_Direction = 2; // Prepare for next loop iteration
+            } else {
+                turn_Servo(RIGHT);
+                motor_Set_Parameters_And_Movement(motor_A, DIR_BCK, 1800);
+                motor_Set_Parameters_And_Movement(motor_B, DIR_BCK, 1800);
+                motor_Direction = 1; // Prepare for next loop iteration
+            }
+        } else { // Right turn logic
+            // Similar logic to left turn, but servo and motors are configured for right turns
+            if (motor_Direction == 1) {
+                turn_Servo(RIGHT);
+                motor_Set_Parameters_And_Movement(motor_A, DIR_FWD, 1800);
+                motor_Set_Parameters_And_Movement(motor_B, DIR_FWD, 1800);
+                motor_Direction = 2; // Prepare for next loop iteration
+            } else {
+                turn_Servo(LEFT);
+                motor_Set_Parameters_And_Movement(motor_A, DIR_BCK, 1800);
+                motor_Set_Parameters_And_Movement(motor_B, DIR_BCK, 1800);
+                motor_Direction = 1; // Prepare for next loop iteration
+            }
+        }
+
+        // Orientation check loop, adjusting for near-0 conditions
+        if (!near_0) {
+            for (int i = 0; i < 400 && motor_Direction; i++) {
+                if (abs((*orientation) - target_Orientation) < MAX_ORI_ERR) {
+                    motor_Direction = 0; // Target reached, stop motors
+                }
+                osDelay(1);
+            }
+        } else {
+            // Handle wrapping of orientation around 0 degrees
+            float lower_Bound, higher_Bound;
+            lower_Bound = target_Orientation > 350 ? target_Orientation - MAX_ORI_ERR : 360 + target_Orientation - MAX_ORI_ERR;
+            higher_Bound = target_Orientation < MAX_ORI_ERR ? target_Orientation + MAX_ORI_ERR : target_Orientation + MAX_ORI_ERR - 360;
+            for (int i = 0; i < 250 && motor_Direction; i++) {
+                if ((*orientation) > lower_Bound || (*orientation) < higher_Bound) {
+                    motor_Direction = 0; // Target reached, stop motors
+                }
+                osDelay(2);
+            }
+        }
+
+        // Ensure motors are stopped after completing turn
+        motor_Stop();
+    }
+}
+
+/*
+ * motor_Direction = { 0: stop, 1: fwd, 2: bck }
+ * turning_Angle only accept 90 (left) or 270 (right)
+ */
+ 
+ 
+ /**
+ * Function: car_Turn
+ * Description: Executes a vehicle turn based on a specified angle and direction, adjusting the vehicle's
+ *              orientation to align with the target orientation. The function dynamically adjusts the servo
+ *              direction and motor speed during the turn for precision.
+ *
+ * Process:
+ * 1. Target Orientation Calculation:
+ *    - Calculates and normalizes the target orientation based on the current orientation and the specified turning angle.
+ *    - Special handling for a direct 180-degree turn (reverse).
+ *
+ * 2. Near-Zero Orientation Handling:
+ *    - Sets flags and bounds for handling target orientations near 0 degrees, ensuring accurate stopping conditions.
+ *
+ * 3. Pre-turn Adjustments:
+ *    - (Commented out) Adjusts the vehicle position before the turn to optimize the turning path.
+ *
+ * 4. Servo Direction and Motor Speed Setup:
+ *    - Configures the servo for left or right turns based on the motor direction and turning angle.
+ *    - Sets the motor speed proportional to the absolute turning angle, ensuring dynamic speed adjustments.
+ *
+ * 5. Turning Execution:
+ *    - Continuously checks the vehicle's current orientation against the target orientation.
+ *    - Dynamically decreases motor speed during the turn for finer control as the target orientation is approached.
+ *    - Stops the motors once the target orientation is achieved within a specified error margin (MAX_ORI_ERR).
+ *
+ * 6. Post-turn Adjustments:
+ *    - (Commented out) Fine-tunes the vehicle's position after the turn to ensure precise alignment.
+ *
+ * Parameters:
+ * - motor_Direction: Specifies the general direction for the turn; 1 for forward, 2 for backward, 3 for a special 180-degree turn.
+ * - turning_Angle: The angle in degrees to turn; positive for clockwise (right) turns, negative for counter-clockwise (left) turns.
+ *
+ * Global Variables:
+ * - orientation: A pointer to a float representing the vehicle's current orientation in degrees.
+ *
+ * Notes:
+ * - MAX_ORI_ERR defines the maximum acceptable deviation from the target orientation.
+ * - turn_Servo, motor_Set_Parameters_And_Movement, and motor_Stop are assumed to be defined elsewhere and control the servo direction,
+ *   motor speed, and stopping of motors, respectively.
+ * - This function provides a comprehensive method for turning the vehicle, incorporating dynamic speed adjustments and precise
+ *   orientation alignment.
+ */
+ 
+ 
+void car_Turn(uint8_t motor_Direction, float turning_Angle) {
+	// Calculate target orientation
+	float target_Orientation = (*orientation) + turning_Angle;
+	while (target_Orientation >= 360) target_Orientation -= 360;
+	while (target_Orientation < 0) target_Orientation += 360;
+	if (motor_Direction == 3) target_Orientation = 180;
+
+	// Adjustments for near 0 degree target orientation
+	uint8_t near_0 = 0;
+	float lower_Bound, higher_Bound;
+	if ((target_Orientation < MAX_ORI_ERR) || (target_Orientation > 360 - MAX_ORI_ERR)) {
+		near_0 = 1;
+		if (target_Orientation > 350) {
+			lower_Bound = target_Orientation - MAX_ORI_ERR;
+			higher_Bound = target_Orientation + MAX_ORI_ERR - 360;
+		}
+		else {
+			lower_Bound = target_Orientation - MAX_ORI_ERR + 360;
+			higher_Bound = target_Orientation + MAX_ORI_ERR;
+		}
+	}
+
+	// Pre-turning adjustments
+	/*if ((turning_Angle == 90) && (motor_Direction == 1)) {
+		motor_Move_In_CM(5.0, 5.0);
+	}
+	else if ((turning_Angle == 270) && (motor_Direction == 1)) {
+		motor_Move_In_CM(9.0, 9.0);
+	}
+	else if ((turning_Angle == 270) && (motor_Direction == 2)) {
+		motor_Move_In_CM(11.5, 11.5);
+	}
+	else if ((turning_Angle == 90) && (motor_Direction == 2)) {
+		motor_Move_In_CM(10.5, 10.5);
+	}
+	motor_Stop();
+	osDelay(200);
+	*/
+
+	// Start servo and motor in slow_Turn direction
+	double absolute_Turning_Angle;
+	if (motor_Direction == 3) {
+		if (turning_Angle <= 180) {
+			turn_Servo(LEFT);
+		}
+		else {
+			turn_Servo(RIGHT);
+		}
+		absolute_Turning_Angle = 90;
+	}
+	else if (((turning_Angle <= 180) && (motor_Direction == 1)) || ((turning_Angle > 180) && (motor_Direction == 2))) {
+		turn_Servo(LEFT);
+		absolute_Turning_Angle = turning_Angle;
+	}
+	else {
+		turn_Servo(RIGHT);
+		absolute_Turning_Angle = 360 - turning_Angle;
+	}
+	//turn_Servo(RIGHT);
+	osDelay(200);
+
+	int motor_Speed = 0;
+	if ((motor_Direction == 1) || (motor_Direction == 3)) {
+		motor_Speed = (int)absolute_Turning_Angle * 35;
+		if (motor_Speed < 1800) motor_Speed = 1800;
+		motor_Set_Parameters_And_Movement(motor_A, DIR_FWD, motor_Speed);
+		motor_Set_Parameters_And_Movement(motor_B, DIR_FWD, motor_Speed);
+	}
+	else {
+		motor_Speed = 2000;
+		motor_Set_Parameters_And_Movement(motor_A, DIR_BCK, motor_Speed);
+		motor_Set_Parameters_And_Movement(motor_B, DIR_BCK, motor_Speed);
+	}
+
+	// Polling orientation and break when target reached
+	while (1) {
+		if (!near_0) {
+			if (abs((*orientation) - target_Orientation) < MAX_ORI_ERR) {
+				break;
+			}
+		}
+		else {
+			if (((*orientation) > lower_Bound) || ((*orientation) < higher_Bound)) {
+				break;
+			}
+		}
+		if (motor_Speed > 1800) {
+			motor_Speed -= 2;
+		}
+		motor_Set_Parameters_And_Movement(motor_A, DIR_FWD, motor_Speed);
+		motor_Set_Parameters_And_Movement(motor_B, DIR_FWD, motor_Speed);
+		osDelay(1);
+	}
+	motor_Stop();
+
+	// Post-turning adjustments
+	/*
+	if ((turning_Angle == 90) && (motor_Direction == 1)) {
+		motor_Move_In_CM(-11.5, -11.5);
+	}
+	else if ((turning_Angle == 270) && (motor_Direction == 1)) {
+		motor_Move_In_CM(-9.3, -9.3);
+	}
+	else if ((turning_Angle == 270) && (motor_Direction == 2)) {
+		motor_Move_In_CM(-6.0, -6.0);
+	}
+	else if ((turning_Angle == 90) && (motor_Direction == 2)) {
+		motor_Move_In_CM(-8.2, -8.2);
+	}
+	*/
+}
+
+/*
+ * @brief Run instruction instruction
+ * @return_Value Distance moved in cm (linear). If execute slow_Turn, always return 0 even if SOSBack is called.
+ */
+ 
+ 
+/**
+ * Function: execute_Instruction
+ * Description: Executes a given instruction by either moving straight for a specified distance or performing a turn
+ *              based on the instruction type. After executing the instruction, it updates the complete error object
+ *              to indicate that the instruction has been completed.
+ * 
+ * Process:
+ * 1. Instruction Processing:
+ *    - If the instruction type is INST_TYPE_GOSTRAIGHT, the robot moves straight for a distance determined by the
+ *      instruction's value. The function calculates the actual distance moved by averaging the counts of both motors
+ *      and converting it back to centimeters.
+ *    - If the instruction type is INST_TYPE_TURN, the robot performs a turn. If the angle is between 0 and 359 degrees,
+ *      it uses the slow_Turn function for a precise turn. For angles outside this range, it adjusts the angle to fall
+ *      within the 0-359 range and uses the car_Turn function for the adjustment.
+ * 
+ * 2. Complete Error Update:
+ *    - After executing the instruction, the function updates the complete error object to indicate that the
+ *      instruction has been completed by setting the type to CPLTERR_TYPE_CPLT if it was previously undefined.
+ * 
+ * Parameters:
+ * - instruction: A pointer to the Instruction object, which contains the instruction type and value.
+ * - complete_Error: A pointer to the CompleteError object, which tracks the completion status and type of error if any.
+ * 
+ * Returns:
+ * - return_Value: The distance moved in centimeters if the instruction is to go straight; 0 for turn instructions.
+ * 
+ * Notes:
+ * - The function assumes INST_TYPE_GOSTRAIGHT and INST_TYPE_TURN are predefined constants representing different
+ *   instruction types.
+ * - CPLTERR_TYPE_UNDEFINED and CPLTERR_TYPE_CPLT are assumed to be predefined constants representing the status of
+ *   the instruction execution in the CompleteError object.
+ * - The motor_Move_In_CM, slow_Turn, and car_Turn functions are assumed to be defined elsewhere and are responsible
+ *   for the actual movement of the robot based on the instructions.
+ * - This function provides a mechanism to execute basic navigation instructions and update the execution status,
+ *   facilitating the coordination between instruction processing and error handling.
+ */
+float execute_Instruction(Instruction* instruction, CompleteError* complete_Error) {
+    float return_Value = 0; // Initialize return value
+
+    // Process the instruction based on its type
+    if (instruction->type == INST_TYPE_GOSTRAIGHT) {
+        // Move straight for a distance specified in the instruction value
+        motor_Move_In_CM((float)instruction->val);
+        // Calculate the actual distance moved
+        return_Value = ((float)(motor_A_PID->count + motor_B_PID->count) / 2) / CNT_PER_CM;
+    } else if (instruction->type == INST_TYPE_TURN) {
+        // Perform a turn based on the instruction value
+        float turning_Angle = (float)instruction->val;
+        if ((turning_Angle >= 0) && (turning_Angle < 360)) {
+            // Valid angle, perform a slow, precise turn
+            slow_Turn(turning_Angle);
+        } else {
+            // Adjust angles outside the 0-359 range and perform the turn
+            if (turning_Angle < 0) {
+                car_Turn(2, turning_Angle + 360); // Adjust and turn left
+            } else {
+                car_Turn(1, turning_Angle - 360); // Adjust and turn right
+            }
+        }
+        // Turning does not return a distance
+        return_Value = 0;
+    } else {
+        // Unsupported instruction type
+        return 0;
+    }
+
+    // Update the complete error object to indicate instruction completion
+    if (complete_Error->type == CPLTERR_TYPE_UNDEFINED) {
+        complete_Error->type = CPLTERR_TYPE_CPLT;
+    }
+    return return_Value; // Return the calculated distance or 0 for turns
+}

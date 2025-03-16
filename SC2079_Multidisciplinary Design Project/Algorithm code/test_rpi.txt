@@ -1,0 +1,38 @@
+import sys
+
+
+from algorithm.entities.connection.rpi_client import RPiClient
+from algorithm.entities.connection.rpi_server import RPiServer
+
+
+def main():
+    # We need to send obstacles to the main PC
+    obstacles = [[105, 75, 90, 0], [175, 25, 180, 1], [175, 155, 180, 2], [75, 125, 180, 4], [45, 185, -90, 5]]
+    print("Let's start a server")
+    server = RPiServer("127.0.0.1", 8000)
+    try:
+        server.start()
+    except OSError or KeyboardInterrupt as e:
+        print(e)
+        server.close()
+        sys.exit(1)
+
+    print("Attempting to connect to main PC")
+    client = RPiClient("127.0.0.1", 10000)
+    # Wait to connect to main PC
+    while True:
+        try:
+            client.connect()
+            break
+        except OSError:
+            pass
+        except KeyboardInterrupt:
+            client.close()
+            sys.exit(1)
+    print("Connected to main PC!\n")
+
+    # Now let's send the obstacle data
+    client.send_message(obstacles)
+
+if __name__ == '__main__':
+    main()

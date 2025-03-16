@@ -1,0 +1,287 @@
+#include "comm.h"
+#include "cmsis_os.h"
+
+/* Global variables */
+
+uint8_t instruction_Id = 0;
+uint8_t acknowledgment_Text = 0;				// ID of Complete / Error ACKed by RPI
+
+uint8_t uart_Buffer[16];
+
+UART_HandleTypeDef* huart3Ptr;
+Instruction* current_Instruction_Pointer;
+CompleteError* complete_Error_Pointer;
+
+/* Private function prototypes */
+
+void uart_Acknowledge(uint8_t id);
+
+/* Functions */
+
+void communication_Initialization(UART_HandleTypeDef* uart, Instruction* current_Instruction_Object_Reference, CompleteError* complete_Error_Object_Reference) {
+    // Resetting global communication-related variables
+    instruction_Id = 0; // Reset the global instruction ID to 0, indicating no instruction is currently processed.
+    acknowledgment_Text = 0; // Reset the global acknowledgment text to 0, indicating no acknowledgment message is pending.
+
+    // Assigning the passed UART handle to a global pointer for further communication tasks.
+    huart3Ptr = uart; 
+    // Storing the pointers to the current instruction and complete error objects for global access.
+    current_Instruction_Pointer = current_Instruction_Object_Reference;
+    complete_Error_Pointer = complete_Error_Object_Reference;
+
+    // Initializing the current instruction object to undefined values.
+    // This ensures the instruction handler starts with a clean slate.
+    current_Instruction_Pointer->id = 0; // Instruction ID reset
+    current_Instruction_Pointer->type = INST_TYPE_UNDEFINED; // Instruction type set to undefined
+    current_Instruction_Pointer->val = 0; // Instruction value reset
+
+    // Initializing the complete error object to undefined values.
+    // This prepares the error handler to report errors cleanly.
+    complete_Error_Pointer->id = 0; // Error ID reset
+    complete_Error_Pointer->type = CPLTERR_TYPE_UNDEFINED; // Error type set to undefined
+    complete_Error_Pointer->pos_x = 0; // X position for error context reset
+    complete_Error_Pointer->pos_y = 0; // Y position for error context reset
+    complete_Error_Pointer->finished = 1; // Flag indicating the error handler is ready for new errors
+
+    return; // Exiting the function after initialization
+}
+
+
+/**
+ * Function: uart_Send
+ * Description: Transmits a structured error message via UART to an external device, typically a Raspberry Pi (RPI).
+ * This function formats and sends a CompleteError message, including error identification, type, and positional data.
+ * It checks for the correct sequence of message acknowledgments to ensure reliable communication.
+ * 
+ * Return: 
+ * - HAL_StatusTypeDef: HAL_OK if transmission succeeds without errors; HAL_ERROR if conditions for a valid transmission are not met.
+ */
+
+HAL_StatusTypeDef uart_Send() {
+    // Check if there's a valid error ID to send. If the ID is 0, it indicates there's no new error to transmit.
+    if (complete_Error_Pointer->id == 0) {
+        return HAL_ERROR; // No valid error to send, return error status.
+    }
+
+    // Ensure the receiving device (RPI) is ready for this message, based on acknowledgment sequence.
+    if (acknowledgment_Text != complete_Error_Pointer->id - 1) {
+        // The receiver is not expecting an error message with this ID, indicating a sequence mismatch.
+        return HAL_ERROR; // Return error status due to acknowledgment mismatch.
+    }
+
+    // Format the error data into a transmission buffer (uart_Buffer) for sending.
+    // The data format incorporates the error type, positional data, and error ID.
+    uart_Buffer[0] = (((0x01 << 1) | (complete_Error_Pointer->type & 0x01)) << 6) | (uint8_t)((complete_Error_Pointer->pos_x >> 5) & 0x003F);
+    uart_Buffer[1] = (uint8_t)((complete_Error_Pointer->pos_x & 0x1F) << 3) | (uint8_t)((complete_Error_Pointer->pos_y >> 8) & 0x0007);
+    uart_Buffer[2] = (uint8_t)(complete_Error_Pointer->pos_y & 0xFF); // Direct byte for Y position.
+    uart_Buffer[3] = complete_Error_Pointer->id; // The ID of the error being reported.
+
+    // Loop to handle message acknowledgment and transmission retries.
+    while (acknowledgment_Text < complete_Error_Pointer->id) {
+        // Transmit the formatted buffer to the external device using UART.
+        HAL_UART_Transmit(huart3Ptr, (uint8_t*)uart_Buffer, 4, UART_ACK_MAX_DELAY);
+
+        // The acknowledgment handling section is simplified for clarity. In a complete implementation,
+        // you would wait for an acknowledgment from the receiver before proceeding.
+        // Here, we simulate acknowledgment reception by incrementally updating acknowledgment_Text.
+        acknowledgment_Text++;
+
+        // Note: The commented out sections suggest a more robust acknowledgment handling mechanism,
+        // including retries and delays until the acknowledgment sequence matches or an error occurs.
+    }
+
+    return HAL_OK; // Transmission successful and acknowledged.
+}
+
+
+/**
+ * Function: uart_Send_Data_To_Camera
+ * Description: This function sends a command via UART to a camera module to perform specific actions based on the obstacle ID.
+ * The command format is predefined with a header followed by an obstacle ID. This allows the camera to differentiate
+ * between different operational modes or targets, such as focusing on specific obstacles identified by their IDs.
+ *
+ * Parameters:
+ * - uint8_t obstacle_Id: The identifier for the obstacle, determining the camera's target or action. Valid IDs are predefined.
+ *
+ * Return:
+ * - HAL_StatusTypeDef: Returns HAL_OK if the data is transmitted successfully; otherwise, returns HAL_ERROR.
+ */
+
+HAL_StatusTypeDef uart_Send_Data_To_Camera(uint8_t obstacle_Id) {
+    // Validate the obstacle ID. The function currently supports only two specific IDs for obstacles: 1 and 2.
+    if ((obstacle_Id != 1) && (obstacle_Id != 2)) {
+        return HAL_ERROR; // Return an error if the obstacle ID is not 1 or 2, indicating unsupported ID.
+    }
+
+    // Prepare the UART transmission buffer with a predefined command header.
+    uart_Buffer[0] = 0x43; // ASCII 'C', part of the command header indicating the start of a camera command.
+    uart_Buffer[1] = 0x41; // ASCII 'A', part of the command header.
+    uart_Buffer[2] = 0x4D; // ASCII 'M', completing the "CAM" command header.
+    uart_Buffer[3] = obstacle_Id; // The actual obstacle ID, specifying the target or action for the camera.
+
+    // Transmit the prepared command to the camera via UART.
+    // Note: The third parameter in HAL_UART_Transmit should match the number of bytes to transmit.
+    // Since we're sending the "CAM" header plus the obstacle ID, it should be 4 instead of 3.
+    return HAL_UART_Transmit(huart3Ptr, (uint8_t*)uart_Buffer, 4, UART_ACK_MAX_DELAY);
+    // Note: UART_ACK_MAX_DELAY specifies the maximum time to wait for the transmission to complete.
+}
+
+
+
+/**
+ * Function: uart_Acknowledge
+ * Description: This function constructs and sends an acknowledgment message via UART communication.
+ * The acknowledgment message consists of a predefined "ACK" header followed by an identifier (ID) byte.
+ * This ID is used to acknowledge the receipt of a specific message or command, allowing the sender to 
+ * verify that their message was received correctly. This mechanism is crucial for reliable communication,
+ * especially in systems where data integrity and confirmation of receipt are important.
+ *
+ * Parameters:
+ * - uint8_t id: The identifier of the message or command being acknowledged. This ID is sent back to the sender
+ *   to indicate which specific message or command has been successfully received and processed.
+ *
+ * Note: This function does not return a value but directly sends the acknowledgment message using UART.
+ */
+void uart_Acknowledge(uint8_t id) {
+    // Prepare the UART transmission buffer with the "ACK" acknowledgment message header.
+    uart_Buffer[0] = 0x41; // ASCII 'A', part of the "ACK" message header.
+    uart_Buffer[1] = 0x43; // ASCII 'C', part of the "ACK" message header.
+    uart_Buffer[2] = 0x4B; // ASCII 'K', completing the "ACK" message header.
+    uart_Buffer[3] = id;   // The ID of the message/command being acknowledged.
+
+    // Transmit the acknowledgment message to the sender via UART.
+    // The HAL_UART_Transmit function is called with the UART handle (huart3Ptr), pointer to the data buffer (uart_Buffer),
+    // the number of bytes to transmit (4 bytes, for "ACK" plus the ID), and the maximum delay allowed for the transmission (UART_ACK_MAX_DELAY).
+    HAL_UART_Transmit(huart3Ptr, (uint8_t*)uart_Buffer, 4, UART_ACK_MAX_DELAY);
+
+    // The function concludes after sending the acknowledgment message. There's no return statement needed as the function return type is void.
+}
+
+
+
+/**
+ * Function: uart_Receive
+ * Description: Processes received UART data, updating the current instruction if the data is valid and in the correct sequence.
+ * The function checks the received data against expected sequence numbers and, if valid, updates the global instruction object
+ * with the new data. This function is part of a communication protocol that ensures instructions are processed in the order they
+ * are received, and it supports a mechanism to acknowledge receipt of instructions.
+ *
+ * Parameters:
+ * - const uint8_t* buffer: Pointer to the buffer containing received UART data. The buffer is expected to contain
+ *   structured data that represents an instruction to the system.
+ *
+ * Return:
+ * - HAL_StatusTypeDef: HAL_OK if the received data is successfully processed and valid; HAL_ERROR otherwise.
+ */
+
+HAL_StatusTypeDef uart_Receive(const uint8_t* buffer) {
+    // Extract the instruction ID from the received data.
+    uint8_t id = buffer[3];
+
+    // Check if the received instruction ID is the next expected one in sequence.
+    if (id == instruction_Id + 1) {       
+        // Check if the current instruction has been completed.
+        if ((complete_Error_Pointer->id == instruction_Id) && (complete_Error_Pointer->finished)) { 
+            // Update the current instruction object with the new instruction details.
+            current_Instruction_Pointer->id = id; // Update the instruction ID.
+            current_Instruction_Pointer->type = (buffer[0] >> 6) & 0x01; // Extract the instruction type from the received data.
+            current_Instruction_Pointer->val = ((int16_t)buffer[1] << 8) | buffer[2]; // Construct the instruction value from two bytes of the buffer.
+
+            // Increment the global instruction ID to expect the next instruction.
+            instruction_Id++;
+
+            // Optionally, send back an acknowledgment for the received instruction (function call commented out).
+            //uart_Acknowledge(instruction_Id);
+
+            return HAL_OK; // Indicate successful processing of the received instruction.
+        }
+    }
+
+    // If the function has not returned HAL_OK by this point, it means the received data did not meet the necessary conditions.
+    // Optionally, send back an acknowledgment indicating the last successfully processed instruction (function call commented out).
+    //uart_Acknowledge(instruction_Id);
+
+    return HAL_ERROR; // Indicate an error in processing the received data.
+}
+
+
+
+
+/**
+ * Function: uart_Receive_Data_From_Camera
+ * Description: Decodes a command received from the camera module through UART communication. 
+ * This function interprets the first byte of the received data to determine the command or 
+ * direction indicated by the camera. This is particularly useful in applications where the 
+ * camera module can detect obstacles or navigate and sends commands back to the main controller 
+ * to take appropriate action.
+ *
+ * Parameters:
+ * - const uint8_t* buffer: Pointer to the buffer containing the data received from the camera.
+ *   The function expects this buffer to have at least one byte of data, representing a command.
+ *
+ * Return:
+ * - uint8_t: A coded value representing the received command. 
+ *   - 0x80 represents a start command ("S").
+ *   - 0 represents a command to move or look left ("L").
+ *   - 2 represents a command to move or look right ("R").
+ *   - 0xFF represents an undefined or unknown command, indicating no action should be taken.
+ */
+
+uint8_t uart_Receive_Data_From_Camera(const uint8_t* buffer) {
+    // Check for the "Start" command indicated by "S".
+    if (buffer[0] == 0x53) { // ASCII value for "S"
+        return 0x80; // Return the code representing the "Start" command.
+    }
+
+    // Check for the "Left" command indicated by "L".
+    if (buffer[0] == 0x4C) { // ASCII value for "L"
+        return 0; // Return the code representing the "Left" direction or action.
+    }
+
+    // Check for the "Right" command indicated by "R".
+    else if (buffer[0] == 0x52) { // ASCII value for "R"
+        return 2; // Return the code representing the "Right" direction or action.
+    }
+
+    // If none of the above conditions are met, return 0xFF indicating an unknown command.
+    return 0xFF;
+}
+
+
+uint8_t get_Current_Instruction_Id() {
+	return instruction_Id;
+}
+
+/**
+ * Function: create_New_Completed_Error
+ * Description: Initializes a new "CompleteError" structure to record an error or event that needs acknowledgment.
+ * This function is called to prepare a new error record, setting its initial state before any specific error details
+ * are populated. It ensures that new error records are created in sequence and acknowledges the previously received command
+ * or instruction, maintaining synchronization between error generation and command processing.
+ *
+ * Parameters:
+ * - uint8_t id: The identifier for the new error record. This ID should match the current instruction ID
+ *               and be sequential to the last acknowledged instruction to ensure proper tracking and acknowledgment.
+ *
+ * Return:
+ * - uint8_t: Returns 1 (true) if a new error record was successfully created, indicating that the conditions for
+ *            creating a new error (matching IDs and correct acknowledgment sequence) were met. Returns 0 (false)
+ *            otherwise, indicating that the new error record was not created due to a sequence mismatch or other condition.
+ */
+
+uint8_t create_New_Completed_Error(uint8_t id) {
+    // Check if the provided ID matches the current instruction ID and if the last instruction has been acknowledged.
+    if ((id == instruction_Id) && (acknowledgment_Text == id - 1)) {
+        // The conditions are met; proceed to initialize the new CompleteError structure.
+        complete_Error_Pointer->id = id; // Set the error ID to the provided ID.
+        complete_Error_Pointer->type = CPLTERR_TYPE_UNDEFINED; // Initialize the error type to undefined.
+        complete_Error_Pointer->pos_x = 0; // Initialize the X position associated with the error to 0.
+        complete_Error_Pointer->pos_y = 0; // Initialize the Y position associated with the error to 0.
+        complete_Error_Pointer->finished = 0; // Mark the error as unfinished (0) indicating that it's a new, active error.
+
+        return 1; // Return 1 indicating successful creation of a new CompleteError record.
+    }
+
+    // If the conditions for creating a new error record are not met, return 0.
+    return 0;
+}

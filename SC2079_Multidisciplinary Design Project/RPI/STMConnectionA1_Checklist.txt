@@ -1,0 +1,47 @@
+from communication.stm32 import STMLink
+
+class RaspberryPi:
+    """
+    Class that represents the Raspberry Pi.
+    """
+
+    def __init__(self):
+        """
+        Initializes the Raspberry Pi.
+        """
+        self.stm_link = STMLink()
+
+    def start(self):
+        """Starts the RPi orchestrator"""
+        try:
+            self.stm_link.connect()
+            """while True:
+            	print("Trying to receive a message from STM")
+            	message = self.stm_link.recv()
+            	print(message)"""
+
+
+            while True:
+            # Continuously prompt for manual commands and send them to STM32
+            	command = input("Enter a command for STM32: ")
+            #encoded_command=command.encode("utf-8")
+            #print("encoded message is: " , encoded_command)
+            #print("encoded message size: ", len(encoded_command))
+            	self.stm_link.send(command)
+            	print("Trying to receive a message :D")
+            	message = self.stm_link.recv()
+            #print(message)
+
+        except KeyboardInterrupt:
+            self.stop()
+
+    def stop(self):
+        """Disconnects gracefully with STM32"""
+        self.stm_link.disconnect()
+
+
+if __name__ == "__main__":
+    rpi = RaspberryPi()
+    rpi.start()
+        #rpi = RaspberryPi()
+        #rpi.start()

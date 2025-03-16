@@ -1,0 +1,277 @@
+import sys
+import time
+import math
+from typing import List
+
+from algorithm import settings
+from algorithm.app import AlgoSimulator, AlgoMinimal
+from algorithm.entities.assets.direction import Direction
+from algorithm.entities.connection.rpi_client import RPiClient
+from algorithm.entities.connection.rpi_server import RPiServer
+from algorithm.entities.grid.obstacle import Obstacle
+from algorithm.entities.grid.position import RobotPosition
+from algorithm.entities.commands.straight_command import StraightCommand
+from algorithm.entities.commands.turn_command import TurnCommand
+from algorithm.entities.robot.robot import Robot
+from algorithm.entities.grid.grid import Grid
+
+
+DIRECTION_CONVERTER = {0: 90,
+                       2: 0,
+                       4: -90,
+                       6: 180}
+
+REVERSE_DIRECTION_CONVERTER = {90: 0,
+                       0: 2,
+                       -90: 4,
+                       180: 6}
+
+def roundup(x):
+    return math.ceil(x / 10.0) * 10
+
+def parse_obstacle_data(data) -> List[Obstacle]:
+    obs = []
+    for obstacle_params in data:
+        obs.append(Obstacle(obstacle_params[0],
+                            obstacle_params[1],
+                            Direction(obstacle_params[2]),
+                            obstacle_params[3]))
+    # [[x, y, orient, index], [x, y, orient, index]]
+    return obs
+
+
+def run_simulator():
+    # Fill in obstacle positions with respect to lower bottom left corner.
+    # (x-coordinate, y-coordinate, Direction)
+    obstacles = [[75, 25, 90, 0], [125, 75, -90, 1], [175, 125, 180, 2], [55, 175, -90, 4], [175, 175, 180, 5]]
+    #obstacles = [[105, 105, 90, 0], [105, 105, 180, 1], [105, 105, 0, 2], [105, 105, -90, 4]]
+    obs = parse_obstacle_data(obstacles)
+    app = AlgoSimulator(obs)
+    app.init()
+    commands = app.robot.convert_all_commands()
+    print()
+    #print(commands)
+    app.execute()
+
+def run_minimal(also_run_simulator):
+    print("Waiting to receive obstacle data from RPi...")
+    # Create a server to receive information from the RPi.
+    server = RPiServer(settings.PC_HOST, settings.PC_PORT)
+    # Wait for the RPi to connect to the PC.
+    try:
+        server.start()
+    except OSError or KeyboardInterrupt as e:
+        print(e)
+        server.close()
+        sys.exit(1)
+
+    # At this point, both the RPi and the PC are connected to each other.
+    # Create a synchronous call to wait for RPi data.
+    data: list = server.receive_data()
+    server.close()
+    print("Got data from RPi:")
+    print(data)
+
+    # obstacles = [[obstacle['x']+5, obstacle['y']+5, DIRECTION_CONVERTER[obstacle['d']], obstacle['id']] for obstacle in
+    #                  data['obstacles']]
+
+    # obstacles = [[obstacle['x'] * 10 + 5, obstacle['y'] * 10 + 5, REVERSE_DIRECTION_CONVERTER[obstacle['d']], obstacle['id']] for obstacle
+    #              in
+    #              data['obstacles']]
+
+    old_obstacles = [[obstacle['x'] * 10 + 5, obstacle['y'] * 10 + 5, obstacle['d'], obstacle['id']] for obstacle
+                  in
+                  data['obstacles']]
+    
+    if len(old_obstacles) < 5:
+        missing_no = 5 - len(old_obstacles)
+        for i in range(missing_no):
+            old_obstacles.append(old_obstacles[-1])
+    # print(obstacles)
+    obstacles = parse_obstacle_data(old_obstacles)
+    print(obstacles)
+    if also_run_simulator:
+        app = AlgoSimulator(obstacles)
+        app.init()
+        app.execute()
+    app = AlgoMinimal(obstacles)
+    app.init()
+    app.execute()
+
+    # Send the list of commands over.
+    """
+    Conversion to a message that is easy to send over the RPi.
+    RPI needs in this format: a,b,abc,c, 1digit,1digit,3digit,1digit
+    first: decides if go straight or turn, 1 is straight, 0 is turn
+    second: if go straight, forward or backwards, 1 is forward, 0 is reverse
+    third: distance, only applies if first argument is 1. unit in cm
+    fourth: only applies if turning, 1 is turn right, 0 is turn left
+    have default argument,
+    """
+
+    print(f"Attempting to connect to {settings.RPI_HOST}:{settings.RPI_PORT}")
+    client = RPiClient(settings.RPI_HOST, settings.RPI_PORT)
+    # Wait to connect to RPi.
+    while True:
+        try:
+            client.connect()
+            break
+        except OSError:
+            pass
+        except KeyboardInterrupt:
+            client.close()
+            sys.exit(1)
+    print("Connected to RPi!\n")
+    print("Sending list of commands to RPi...")
+
+    commands = app.robot.convert_all_commands()
+    print(commands)
+
+    """
+        Example commands
+        [[1, 0, 90], [2, 1, -90], [3, 0, 10],
+
+        We now need to get the x and y coordinates after each command
+    """
+    # Calculate the x, y coordinates after each command
+    path_hist = [{"d": REVERSE_DIRECTION_CONVERTER[Direction.TOP.value],
+                "s": -1,
+                "x": 1,
+                "y": 1}]
+    # robot_coordinates = RobotPosition(15,
+    #                                   15,
+    #                                   Direction.TOP,
+    #                                   90)
+    grid = Grid(obstacles)
+    robot = Robot(grid)
+    robot.pos.x = 15
+    robot.pos.y = 15
+    
+    #order_of_obstacles = robot.plan_path
+    #print(order_of_obstacles)
+    final_commands = []
+    continue_again = False
+    obstacle_counter = 0
+    command_increment = 0
+    stop_counter = 0
+    for i in range(len(commands)):
+        #print(command)
+        if continue_again:
+            continue_again = False
+            continue
+
+        if commands[i] == None: # It is a repeat
+            continue_again = True
+            continue
+
+        else:
+            #print(command)
+            if commands[i].startswith("stop"):
+                #obstacle_id = find_obstacle_id(order_of_obstacles, obstacle_counter, old_obstacles)
+                
+                #final_commands.append(command + str(obstacle_id))
+                #obstacle_id = order_of_obstacles[obstacle_counter].index
+                #obstacle_counter += 1
+                new_id = int(commands[i-1][:3]) + 1 + command_increment
+                #final_commands.append(str(new_id).zfill(3)+ '0-010')
+                #command_increment += 1
+                new_id = int(commands[i-1][:3]) + 1 + command_increment
+                final_commands.append(commands[i])
+                #final_commands.append(str(new_id).zfill(3)+ '0+010')
+                #command_increment += 1
+                
+            else:
+                #final_commands.append(command)
+                new_id = int(commands[i][:3]) + command_increment
+                pass
+        
+
+        if commands[i][3] == '0': # Straight command
+            #StraightCommand(command[2]).apply_on_pos(robot_coordinates)
+            # robot.straight(command[2])
+            final_commands.append(str(new_id).zfill(3)+commands[i][3:])
+            robot.straight(int(commands[i][-4:]))
+
+        elif commands[i][3] == '1':  # Turn command
+            #command_increment += 1
+            old_x = robot.pos.x
+            old_y = robot.pos.y
+            if int(commands[i][-4:]) == 81:  # Left Turn
+                final_commands.append(str(new_id).zfill(3)+commands[i][3:])
+                command_increment += 1
+                final_commands.append(str(new_id+1).zfill(3)+'0-013')
+                robot.turn(90, False)
+
+            elif int(commands[i][-4:]) == -275:  # Reverse and turn wheels to the right
+                final_commands.append(str(new_id).zfill(3)+'0+013')
+                command_increment += 1
+                final_commands.append(str(new_id+1).zfill(3)+commands[i][3:])
+                robot.turn(90, True)
+
+            elif int(commands[i][-4:]) == 277:  # Turn right
+                final_commands.append(str(new_id).zfill(3)+commands[i][3:])
+                command_increment += 1
+                final_commands.append(str(new_id+1).zfill(3)+'0-014')
+                robot.turn(-90, False)
+
+            elif int(commands[i][-4:]) == -84:  # Reverse and turn wheels to the left
+                final_commands.append(str(new_id).zfill(3)+'0+012')
+                command_increment += 1
+                final_commands.append(str(new_id+1).zfill(3)+commands[i][3:])
+                robot.turn(-90, True)
+
+            # TurnCommand(90, False),  # Forward right turn
+            # TurnCommand(-90, False),  # Forward left turn
+            # TurnCommand(90, True),  # Reverse with wheels to right.
+            # TurnCommand(-90, True),  # Reverse with wheels to left.
+
+            """Convert pygame grid coordinates to actual x and y coordinate"""
+            change_in_x_coordinate = robot.get_current_pos().x - old_x
+            change_in_y_coordinate = robot.get_current_pos().y - old_y
+
+            robot.pos.x = old_x + (change_in_x_coordinate / settings.SCALING_FACTOR)
+            robot.pos.y = old_y + (change_in_y_coordinate / settings.SCALING_FACTOR)
+
+
+
+        # path = {"d": robot_coordinates.direction,
+        #         "s": -1,
+        #         "x": robot_coordinates.x,
+        #         "y": robot_coordinates.y}
+
+        curr_pos = robot.get_current_pos()
+        """We now need to convert from pygame x y to Android format"""
+        path = {"d": REVERSE_DIRECTION_CONVERTER[curr_pos.direction.value],
+                "s": -1,
+                "x": math.floor((curr_pos.x-5) / 10),
+                "y": math.floor((curr_pos.y - 5 ) / 10)}
+
+        if path == path_hist[-1]:
+            continue
+
+        path_hist.append(path.copy())
+
+    final_commands.append("FIN")
+    msg_to_send = [final_commands, path_hist]
+    print(msg_to_send)
+    client.send_message(msg_to_send)
+    client.close()
+
+def run_rpi():
+    while True:
+        run_minimal(False)
+        time.sleep(5)
+
+def find_obstacle_id(order_of_obstacles, obstacle_counter, obstacles):
+    curr_obstacle = order_of_obstacles[obstacle_counter]
+    for obstacle in obstacles:
+        if obstacle[0] == curr_obstacle.pos.x and obstacle[1] == curr_obstacle.pos.y:
+            return obstacle[3]
+
+
+
+if __name__ == '__main__':
+    time.sleep(10)
+    run_simulator()
+    #run_minimal(False)
+

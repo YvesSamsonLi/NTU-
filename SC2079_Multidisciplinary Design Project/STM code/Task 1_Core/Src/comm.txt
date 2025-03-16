@@ -1,0 +1,128 @@
+#include "comm.h"
+#include "cmsis_os.h"
+
+/* Global variables */
+
+uint8_t instructionId = 0;	 	//To track which instruction has been run
+uint8_t ackTx = 0;				// ID of Complete or Error ACKed by RPI
+
+uint8_t uartbuf[16];
+
+UART_HandleTypeDef* huart3Ptr;
+Instruction* curInstPtr;
+CompleteError* cpltErrPtr;
+
+/* Private function prototypes */
+
+void uart_ack(uint8_t id);
+void clear_uartbuf();
+
+/* Functions */
+
+void comm_init(UART_HandleTypeDef* uart, Instruction* curInstObjRef, CompleteError* cpltErrObjRef) {
+	instructionId = 0;
+	ackTx = 0;
+
+	huart3Ptr = uart;
+	curInstPtr = curInstObjRef;
+	cpltErrPtr = cpltErrObjRef;
+
+	curInstPtr->id = 0;
+	curInstPtr->type = INST_TYPE_UNDEFINED;
+	curInstPtr->val = 0;
+
+	cpltErrPtr->id = 0;
+	cpltErrPtr->type = CPLTERR_TYPE_UNDEFINED;
+	cpltErrPtr->pos_x = 0;
+	cpltErrPtr->pos_y = 0;
+	cpltErrPtr->finished = 1;
+
+	clear_uartbuf(); // Clear the UART buffer at initialization
+
+	return;
+}
+
+
+HAL_StatusTypeDef uart_send() {
+	if ((cpltErrPtr->id == 0) || (ackTx != cpltErrPtr->id - 1) ) { //RPI is not expecting CompleteError with this id or No instruction yet
+		return HAL_ERROR;
+	}
+
+	uartbuf[0] = 0x41; //A
+	uartbuf[1] = 0x43; //C
+	uartbuf[2] = 0x4B; //K
+
+	while (ackTx < cpltErrPtr->id) {
+	
+		HAL_UART_Transmit(huart3Ptr, (uint8_t*)uartbuf, 3, UART_ACK_MAX_DELAY);
+		// Waiting for ACK
+		// Disable ack from rpi
+		ackTx++;
+	}
+	return HAL_OK;
+}
+
+
+void uart_ack(uint8_t id) {
+
+	uartbuf[0] = 0x41; //A
+	uartbuf[1] = 0x43; //C
+	uartbuf[2] = 0x4B; //K
+	uartbuf[3] = id +'0'; 
+	HAL_UART_Transmit(huart3Ptr, (uint8_t*)uartbuf, 4, UART_ACK_MAX_DELAY);
+	return;
+}
+
+// Function to convert a buffer of bytes to a 32-bit integer
+int32_t bufToNum(const uint8_t* buf, int size) {
+    int32_t num = 0; // Initialize the result variable to store the converted number
+    for (int i = 0; i < size; i++) { // Iterate through each byte in the buffer
+        num = (num * 10) + (buf[i] - 48); // Convert the byte to its corresponding digit and add it to the result
+    }
+    return num; // Return the final converted number
+}
+
+HAL_StatusTypeDef uart_receive(const uint8_t* buf) {
+	uint8_t id = (uint8_t) bufToNum(buf, 3);
+	    
+	clear_uartbuf(); // Clear UART buffer after processing received data
+
+	if (id == instructionId + 1) {		// Received instruction is correct in order
+		if ((cpltErrPtr->id == instructionId) && (cpltErrPtr->finished)) {	// Current instruction finished
+			curInstPtr->id = id;
+			curInstPtr->type = (uint8_t)bufToNum(buf+3, 1);
+			if (buf[4] == 43) {
+				curInstPtr->val = (int16_t)bufToNum(buf+5, 3);
+			}
+			else if (buf[4] == 45) {
+				curInstPtr->val = ((int16_t)bufToNum(buf+5, 3)) * (-1);
+			}
+			instructionId++;
+			return HAL_OK;
+		}
+	}
+
+	return HAL_ERROR;
+}
+
+void clear_uartbuf() {
+    memset(uartbuf, 0, sizeof(uartbuf)); // Clear the buffer
+}
+
+uint8_t getCurInstId() {
+	return instructionId;
+}
+
+// Function to create a new completion error
+uint8_t newCpltErr(uint8_t id) {
+    if ((id == instructionId) && (ackTx == id - 1)) { // Check if the provided id matches the instructionId and ackTx is id - 1
+        // If the conditions are met, set the values in the cpltErrPtr structure
+        cpltErrPtr->id = instructionId;
+        cpltErrPtr->type = CPLTERR_TYPE_UNDEFINED;
+        cpltErrPtr->pos_x = 0;
+        cpltErrPtr->pos_y = 0;
+        cpltErrPtr->finished = 0;
+        return 1; // Return 1 indicating success
+    }
+    return 0; // Return 0 indicating failure
+}

@@ -1,0 +1,20 @@
+import json
+import requests
+# This is to test if the image recognition api works. It uses the images named test1.jpg, with the number increasing
+api_ip = "192.168.50.214"
+api_port = "5000"
+for i in range (1,5):
+    url = f"http://localhost:{api_port}/image"
+    filename = "test" + str(i) + ".jpg"
+    response = requests.post(url, files={"file": (filename, open(filename, 'rb'))})
+    
+    if response.status_code != 200:
+        print("Something went wrong when requesting path from image-rec API. Please try again.")
+
+    results = json.loads(response.content)
+    
+    print(f"results: {results}")
+url2 = f"http://localhost:{api_port}/stitch"
+requests.get(url2)
+
+
