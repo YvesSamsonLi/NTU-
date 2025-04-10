@@ -1,0 +1,33 @@
+*.csv
+*.wav
+*.xlsx
+*.h5
+
+```gitignore
+# Python bytecode and cache files
+__pycache__/
+*.py[cod]
+*.so
+
+# Virtual environment folders
+venv/
+env/
+
+# Jupyter Notebook checkpoints
+.ipynb_checkpoints
+
+# Logs and temporary files
+*.log
+*.tmp
+
+# OS-specific files
+.DS_Store
+Thumbs.db
+
+# VSCode settings
+.vscode/
+
+# Other build artifacts
+*.egg-info/
+dist/
+build/
