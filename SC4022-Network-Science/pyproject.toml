@@ -1,0 +1,62 @@
+[tool.black]
+line-length = 240
+
+[build-system]
+requires = ["setuptools>=42", "wheel", "setuptools_scm[tomli]>=6.3"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "SC4022-Network-Science"
+version = "0.1.0"
+authors = [
+    { name = "Kaichen Zhang", email = "zhan0564@e.ntu.edu.sg" },
+    { name = "Tham Zeng Lam", email = "THAM0169@e.ntu.edu.sg" },
+    { name = "Yves Samson Li", email = "Yves0002@e.ntu.edu.sg"}
+]
+description = "Network Science Project"
+readme = "README.md"
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+]
+requires-python = ">=3.8"
+license = { text = "MIT" }
+dependencies = [
+    "matplotlib",   # For network visualization and animations
+    "networkx",     # For graph processing and analysis
+    "numpy",        # For numerical operations
+    "pandas",       # For data manipulation and cleaning
+    "requests",     # For fetching XML files from DBLP
+    "scipy",        # For advanced graph operations (if needed)
+    "xlrd",         # For reading older Excel files
+    "pillow",       # ✅ Required for saving animations as GIFs
+    "pathlib",      # ✅ Used to manage file paths
+    "tqdm",         # For progress tracking
+    "seaborn",
+    "scikit-learn"
+]
+
+
+[project.optional-dependencies]
+opt = [
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["*"]
+exclude = [
+    "test"
+]
+
+[tool.wheel]
+exclude = [
+    "test"
+]
+
+[project.scripts]
+sc4022 = "sc4022.__main__:main"
+
+[project.urls]
+Homepage = "https://xxx.github.io"
+Repository = "https://github.com/xxx/yyy"
