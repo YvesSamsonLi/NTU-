@@ -135,6 +135,7 @@ The giant component remains robust, and bridge count is halved—demonstrating i
 │       └── graph_utils.py          # All graph construction and analysis functions
 └── main.py                         # CLI entry point
 
+```
 
 ---
 
