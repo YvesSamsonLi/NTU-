@@ -108,7 +108,6 @@ The giant component remains robust, and bridge count is halved—demonstrating i
 
 ---
 
-## 📂 File & Folder Structure
 ## 📂 Project File & Folder Structure
 
 ```bash
