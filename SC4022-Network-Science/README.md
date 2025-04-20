@@ -108,10 +108,10 @@ The giant component remains robust, and bridge count is halved—demonstrating i
 
 ---
 
-📂 File & Folder Structure
-bash
-Copy
-Edit
+## 📂 File & Folder Structure
+## 📂 Project File & Folder Structure
+
+```bash
 .
 ├── inputs/
 │   └── DataScientists.xls          # Original Excel data
@@ -134,40 +134,42 @@ Edit
 │   └── utils/
 │       └── graph_utils.py          # All graph construction and analysis functions
 └── main.py                         # CLI entry point
-📈 Visual Outputs
-✅ Collaboration_Evolution.gif — Year-by-year growth of the network
 
-✅ Degree Distribution & Clustering Coefficient plots
 
-✅ Real vs Random model comparison
+---
 
-✅ Centrality correlation plots over time
+## 📈 Visual Outputs
 
-✅ optimal_k_cluster.png — KMeans elbow method
+✅ `Collaboration_Evolution.gif` — Year-by-year growth of the collaboration network  
+✅ Degree distribution & clustering coefficient plots  
+✅ Real vs Random model (ER/BA) comparison visualizations  
+✅ Centrality correlation plots over time  
+✅ `optimal_k_cluster.png` — Elbow method for KMeans clustering  
+✅ `bar_chart_comparison.png` — Before vs after metric transformation
 
-✅ bar_chart_comparison.png — Metric comparison (before vs after transformation)
+---
 
-🧰 Tools & Libraries Used
-Python 3.10+
+## 🧰 Tools & Libraries Used
 
-networkx
+- Python 3.10+
+- `networkx`
+- `matplotlib`, `seaborn`
+- `scikit-learn`
+- `pandas`, `numpy`
+- `argparse`, `pathlib`
+- `tqdm`, `collections`, `json`, `os`
 
-matplotlib, seaborn
+---
 
-scikit-learn
+## 👥 Team
 
-pandas, numpy
-
-argparse, pathlib
-
-tqdm, collections, json, os
-
-👥 Team
-Developed by students of SC4022 – Network Science
+Developed by students of **SC4022 – Network Science**  
 Nanyang Technological University (NTU), AY2024/25
-Tham Zeng Lam
-Yves Samson Li
-Zhang Kaichen
+
+- **Tham Zeng Lam**  
+- **Yves Samson Li**  
+- **Zhang Kaichen**
+
 
 ## 🏁 How to Run This Project
 
